@@ -1,0 +1,33 @@
+# Local Python environments
+.venv-wsl/
+.venv-win/
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local configuration
+.env
+.env.*
+
+# Generated runtime output
+debug/
+logs/
+artifacts/
+
+# Generated training data and model outputs
+data/
+models/
+
+# Local media/debug dumps
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.bmp
+*.mp4
+*.avi
+*.jsonl
