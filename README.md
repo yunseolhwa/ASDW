@@ -9,6 +9,20 @@ Minecraft 화면 중앙에 뜨는 `A`, `S`, `D`, `W` 프롬프트를 캡처해�
 
 Windows 데몬 API의 키 입력 기본값은 실제 입력입니다. 검증만 할 때는 요청에 `dry_run = $true`를 명시하세요.
 
+## Codex 프로젝트 설정
+
+Codex 앱 Local Environment용 ASDW 설정은 `.codex/README.md`에 고정했습니다.
+
+권장 구성:
+
+- Setup script: `powershell -ExecutionPolicy Bypass -File .\scripts\codex_setup_windows.ps1`
+- Action `Start Windows daemon`: `powershell -ExecutionPolicy Bypass -File .\scripts\run_capture_daemon_windows.ps1`
+- Action `Start WSL model server`: `powershell -ExecutionPolicy Bypass -File .\scripts\run_server_wsl.ps1`
+- Action `Check ASDW status`: `powershell -ExecutionPolicy Bypass -File .\scripts\codex_status.ps1`
+- Action `Run Python compile check`: `powershell -ExecutionPolicy Bypass -File .\scripts\codex_py_compile.ps1`
+
+데몬은 화면 캡처와 키 입력 권한을 다루므로 setup script에서 자동 실행하지 않고 명시적인 Action으로만 켭니다.
+
 ## 모델/센서
 
 - `template`: OpenCV 버튼 분할과 글자 템플릿 매칭. 빠르고 실제 입력의 주 센서입니다.

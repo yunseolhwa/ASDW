@@ -1,0 +1,65 @@
+# ASDW Codex Local Environment
+
+This folder documents the Codex app Local Environment setup for this project.
+
+Open the ASDW project in Codex app settings, then register the commands below as
+setup scripts and project actions. Codex stores app-generated Local Environment
+configuration in this `.codex` project folder.
+
+## Project
+
+- Name: ASDW
+- Root: `D:\asdw-fusion-typer`
+- Windows daemon: `http://127.0.0.1:7870`
+- WSL model server: `http://127.0.0.1:7868`
+
+## Setup Script
+
+Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\codex_setup_windows.ps1
+```
+
+This checks Python virtual environment dependencies and compiles the core Python
+modules. It does not start long-running services.
+
+## Actions
+
+### Start Windows daemon
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_capture_daemon_windows.ps1
+```
+
+Starts the screen capture and keyboard input daemon on `127.0.0.1:7870`.
+
+### Start WSL model server
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_server_wsl.ps1
+```
+
+Starts the WSL ROCm model server on port `7868`.
+
+### Check ASDW status
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\codex_status.ps1
+```
+
+Checks git state, daemon health, and model server health.
+
+### Run Python compile check
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\codex_py_compile.ps1
+```
+
+Compiles the Windows daemon, client, and server modules.
+
+## Safety
+
+The daemon can capture the visible screen and send keyboard input. Keep daemon
+startup as an explicit action instead of automatic setup.
+

@@ -1,0 +1,26 @@
+{
+  "project": "ASDW",
+  "notes": "Reference manifest for Codex app Local Environment actions. If the app UI generates a different internal schema, use .codex/README.md as the source of truth and register these commands there.",
+  "setup": {
+    "windows": "powershell -ExecutionPolicy Bypass -File .\\scripts\\codex_setup_windows.ps1"
+  },
+  "actions": [
+    {
+      "name": "Start Windows daemon",
+      "windows": "powershell -ExecutionPolicy Bypass -File .\\scripts\\run_capture_daemon_windows.ps1"
+    },
+    {
+      "name": "Start WSL model server",
+      "windows": "powershell -ExecutionPolicy Bypass -File .\\scripts\\run_server_wsl.ps1"
+    },
+    {
+      "name": "Check ASDW status",
+      "windows": "powershell -ExecutionPolicy Bypass -File .\\scripts\\codex_status.ps1"
+    },
+    {
+      "name": "Run Python compile check",
+      "windows": "powershell -ExecutionPolicy Bypass -File .\\scripts\\codex_py_compile.ps1"
+    }
+  ]
+}
+
