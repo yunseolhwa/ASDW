@@ -8,6 +8,12 @@ script = ""
 [setup.win32]
 script = "powershell -ExecutionPolicy Bypass -File .\\scripts\\codex_setup_windows.ps1"
 
+[cleanup]
+script = ""
+
+[cleanup.win32]
+script = "powershell -ExecutionPolicy Bypass -File .\\scripts\\codex_cleanup.ps1"
+
 [[actions]]
 name = "Start Windows daemon"
 icon = "run"
@@ -32,3 +38,8 @@ icon = "test"
 command = "powershell -ExecutionPolicy Bypass -File .\\scripts\\codex_py_compile.ps1"
 platform = "win32"
 
+[[actions]]
+name = "Clean ASDW temp files"
+icon = "tool"
+command = "powershell -ExecutionPolicy Bypass -File .\\scripts\\codex_cleanup.ps1"
+platform = "win32"

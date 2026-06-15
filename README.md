@@ -20,6 +20,7 @@ Codex 앱 Local Environment용 ASDW 설정은 `.codex/README.md`에 고정했습
 - Action `Start WSL model server`: `powershell -ExecutionPolicy Bypass -File .\scripts\run_server_wsl.ps1`
 - Action `Check ASDW status`: `powershell -ExecutionPolicy Bypass -File .\scripts\codex_status.ps1`
 - Action `Run Python compile check`: `powershell -ExecutionPolicy Bypass -File .\scripts\codex_py_compile.ps1`
+- Action `Clean ASDW temp files`: `powershell -ExecutionPolicy Bypass -File .\scripts\codex_cleanup.ps1`
 
 데몬은 화면 캡처와 키 입력 권한을 다루므로 setup script에서 자동 실행하지 않고 명시적인 Action으로만 켭니다.
 

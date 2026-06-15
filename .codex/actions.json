@@ -4,6 +4,9 @@
   "setup": {
     "windows": "powershell -ExecutionPolicy Bypass -File .\\scripts\\codex_setup_windows.ps1"
   },
+  "cleanup": {
+    "windows": "powershell -ExecutionPolicy Bypass -File .\\scripts\\codex_cleanup.ps1"
+  },
   "actions": [
     {
       "name": "Start Windows daemon",
@@ -20,7 +23,10 @@
     {
       "name": "Run Python compile check",
       "windows": "powershell -ExecutionPolicy Bypass -File .\\scripts\\codex_py_compile.ps1"
+    },
+    {
+      "name": "Clean ASDW temp files",
+      "windows": "powershell -ExecutionPolicy Bypass -File .\\scripts\\codex_cleanup.ps1"
     }
   ]
 }
-

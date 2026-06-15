@@ -28,6 +28,18 @@ powershell -ExecutionPolicy Bypass -File .\scripts\codex_setup_windows.ps1
 This checks Python virtual environment dependencies and compiles the core Python
 modules. It does not start long-running services.
 
+## Cleanup Script
+
+Configured Windows cleanup script:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\codex_cleanup.ps1
+```
+
+This removes known ASDW/Codex temporary folders and Python caches. It does not
+delete models, datasets, virtual environments, `.git`, or the full `artifacts`
+folder.
+
 ## Actions
 
 Configured actions:
@@ -63,6 +75,14 @@ powershell -ExecutionPolicy Bypass -File .\scripts\codex_py_compile.ps1
 ```
 
 Compiles the Windows daemon, client, and server modules.
+
+### Clean ASDW temp files
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\codex_cleanup.ps1
+```
+
+Runs the same safe cleanup script manually from the Codex action header.
 
 ## Safety
 
