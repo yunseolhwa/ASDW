@@ -1,8 +1,10 @@
-# Optional stronger Windows providers. The daemon keeps working without these.
+# Experimental Windows provider candidates.
+# Not part of the minimum baseline stack.
+# Do not install by default; use only for a focused provider experiment.
 pywinctl
 pywinauto
 pydirectinput-rgx
 dxcam
 
-# Experimental candidate for a future HWND/HMONITOR capture provider:
+# Future HWND/HMONITOR capture candidate:
 # windows-capture

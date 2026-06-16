@@ -86,14 +86,15 @@ LLM은 비전 분류기가 아니라 action 컨트롤러입니다. 현재 구현
 - `GET /daemon/status`
   - TODO 호환 alias
 
-## 구현된 provider API
+## Provider API 상태
 
-기본 운영 경로는 계속 `builtin` 입력과 `mss` 캡처입니다. 강한 provider는 optional dependency로 두고 실패해도 데몬이 죽지 않게 구성했습니다.
+기본 운영 경로는 계속 Windows `SendInput` 입력과 `mss` 캡처입니다. Provider API는 확장 지점으로만 존재하며, optional provider 후보는 현재 필수 스택이 아닙니다.
 
 - optional dependency 파일
   - `requirements-windows-strong.txt`
-  - 포함: `pywinctl`, `pywinauto`, `pydirectinput-rgx`, `dxcam`
+  - 포함 후보: `pywinctl`, `pywinauto`, `pydirectinput-rgx`, `dxcam`
   - `windows-capture`는 주석 처리된 실험 후보
+  - baseline 설치 절차에는 포함하지 않음
 - `GET /providers`
   - window/input/capture/accessibility provider capability 반환
 - target registry
@@ -101,15 +102,18 @@ LLM은 비전 분류기가 아니라 action 컨트롤러입니다. 현재 구현
   - `POST /targets/select`
   - `GET /targets/current`
   - `POST /targets/refresh`
-  - PyWinCtl 우선, 실패 시 builtin Win32 fallback
+  - baseline은 builtin Win32 API
+  - PyWinCtl은 필요 검증 후 실험
 - input provider
   - `POST /keys/press`에 `provider = builtin|pydirectinput`
   - dry-run은 provider 설치 여부와 무관하게 큐/타이밍만 검증
   - 한글/IME `type_text`는 builtin 유지
+  - pydirectinput live 동작은 미검증
 - capture provider
   - `/frame`, `/stream`, `/frame_base64`, `/predict_once`에 `provider = mss|dxcam|windows_capture`
   - `dxcam`은 ROI/target region 캡처 후보
   - `windows_capture`는 등록된 실험 후보이며 기본 실행 provider로는 아직 미연결
+  - optional capture provider 실기 동작은 미검증
 - agent 연동
   - `/agent/step`은 frame metadata에 provider/target/region을 포함
   - `/agent/act`는 `target_id`가 stale이면 입력 실행 전 차단

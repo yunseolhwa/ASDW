@@ -120,22 +120,23 @@ POST http://127.0.0.1:7870/predict_and_press
 
 기본은 사용자가 보는 모니터 전체 화면입니다. `roi=0.34 0.46 0.66 0.57` 같은 값을 줄 때만 잘라서 보냅니다.
 
-강한 Windows provider는 optional입니다. 기본 운영 경로는 계속 `builtin` 입력과 `mss` 캡처입니다.
+현재 baseline은 최소 스택입니다. 기본 운영 경로는 계속 Windows `SendInput` 입력과 `mss` 캡처입니다.
 
 ```powershell
-.\.venv-win\Scripts\python.exe -m pip install -r requirements-windows-strong.txt
 Invoke-RestMethod "http://127.0.0.1:7870/providers"
 Invoke-RestMethod "http://127.0.0.1:7870/targets"
 ```
 
-지원 provider:
+Optional provider 후보는 기본 설치 대상이 아닙니다. 기존 경로로 해결할 수 없는 문제가 확인될 때만 `requirements-windows-strong.txt`를 실험용으로 사용합니다.
 
-- target registry: `pywinctl` 우선, 실패 시 builtin Win32 fallback
-- input: `/keys/press`의 `provider = "builtin" | "pydirectinput"`
-- capture: `/frame_base64`의 `provider = "mss" | "dxcam" | "windows_capture"`
-- accessibility 후보: `pywinauto`는 dependency/capability만 노출하고, UIA snapshot API는 다음 단계에서 붙입니다.
+실험 후보:
 
-`windows_capture`는 실험 후보로 등록만 되어 있으며 기본 경로에서는 사용하지 않습니다.
+- target registry: `pywinctl`
+- input: `pydirectinput-rgx`
+- capture: `dxcam`, `windows-capture`
+- accessibility: `pywinauto`
+
+이 후보들은 아직 baseline 작동 검증 완료 항목이 아닙니다.
 
 `predict_once` 예:
 
@@ -164,7 +165,7 @@ $body = @{
 Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:7870/keys/press" -ContentType "application/json" -Body $body
 ```
 
-DirectX/게임 호환 입력을 실험하려면 optional dependency 설치 후 `provider = "pydirectinput"`를 지정합니다. 한글/IME 텍스트 입력은 계속 builtin 경로를 사용합니다.
+DirectX/게임 호환 입력 후보는 아직 baseline이 아닙니다. 한글/IME 텍스트 입력은 계속 builtin 경로를 사용합니다.
 
 순서가 중요한 작업은 대기열을 유지합니다:
 
