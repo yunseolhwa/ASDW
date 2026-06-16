@@ -5,7 +5,17 @@ param(
     [string]$DebugDir = ""
 )
 
-$Project = "D:\asdw-fusion-typer"
+$ErrorActionPreference = "Stop"
+
+$Project = Split-Path -Parent $PSScriptRoot
+$Python = Join-Path $Project ".venv-win\Scripts\python.exe"
+
+Set-Location $Project
+
+if (-not (Test-Path $Python)) {
+    throw "Windows virtual environment is missing: .\.venv-win. Run the Codex setup first."
+}
+
 $ArgsList = @(
     "-m", "asdw_fusion.client_windows",
     "--sensors", $Sensors,
@@ -19,4 +29,7 @@ if ($DebugDir) {
     $ArgsList += @("--debug-dir", $DebugDir, "--draw-debug")
 }
 
-& "$Project\.venv-win\Scripts\python.exe" @ArgsList
+& $Python @ArgsList
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+}

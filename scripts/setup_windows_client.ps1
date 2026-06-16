@@ -2,7 +2,29 @@ param(
     [string]$PythonPath = ""
 )
 
-$Project = "D:\asdw-fusion-typer"
+$ErrorActionPreference = "Stop"
+
+$Project = Split-Path -Parent $PSScriptRoot
+$VenvDir = Join-Path $Project ".venv-win"
+$VenvPython = Join-Path $VenvDir "Scripts\python.exe"
+$Requirements = Join-Path $Project "requirements-windows.txt"
+
+function Invoke-Checked {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+        [Parameter(ValueFromRemainingArguments = $true)]
+        [string[]]$Arguments
+    )
+
+    & $FilePath @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "Command failed with exit code ${LASTEXITCODE}: $FilePath $($Arguments -join ' ')"
+    }
+}
+
+Set-Location $Project
+
 if (-not $PythonPath) {
     $Candidates = @(
         "$env:USERPROFILE\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe",
@@ -25,6 +47,9 @@ if (-not $PythonPath) {
     throw "No Python executable found. Pass -PythonPath explicitly."
 }
 
-& $PythonPath -m venv "$Project\.venv-win"
-& "$Project\.venv-win\Scripts\python.exe" -m pip install --upgrade pip==26.1.2 wheel==0.47.0 setuptools==82.0.1
-& "$Project\.venv-win\Scripts\python.exe" -m pip install -r "$Project\requirements-windows.txt"
+if (-not (Test-Path $VenvPython)) {
+    Invoke-Checked $PythonPath "-m" "venv" $VenvDir
+}
+
+Invoke-Checked $VenvPython "-m" "pip" "install" "--upgrade" "pip==26.1.2" "wheel==0.47.0" "setuptools==82.0.1"
+Invoke-Checked $VenvPython "-m" "pip" "install" "-r" $Requirements
