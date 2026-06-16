@@ -8,7 +8,7 @@ cd "${PROJECT_DIR}"
 source .venv-wsl/bin/activate
 export HSA_ENABLE_SDMA="${HSA_ENABLE_SDMA:-0}"
 export HSA_OVERRIDE_GFX_VERSION="${HSA_OVERRIDE_GFX_VERSION:-10.3.0}"
-export ASDW_SENSORS="${ASDW_SENSORS:-template,clip}"
+export ASDW_SENSORS="${ASDW_SENSORS:-template,classifier}"
 export ASDW_PORT="${PORT}"
 
 python -m asdw_fusion.server >/tmp/asdw-server.log 2>&1 &

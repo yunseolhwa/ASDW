@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -33,6 +34,37 @@ DEFAULT_DAEMON_URL = "http://127.0.0.1:7870"
 DEFAULT_LLM_BASE_URL = "http://127.0.0.1:8000/v1"
 DEFAULT_LLM_MODEL = "Qwen/Qwen2.5-3B-Instruct"
 ACTIONABLE_AGENT_ACTIONS = {"press_sequence", "type_text"}
+FUSION_SENSORS = ("template", "classifier", "clip", "trocr", "owlvit")
+BASELINE_FUSION_SENSORS = ("template", "classifier")
+CANDIDATE_FUSION_SENSORS = ("clip", "trocr", "owlvit")
+DEFAULT_SEQUENCE_MIN_CONFIDENCE = 0.30
+SENSOR_ROLES = {
+    "template": {
+        "tier": "baseline",
+        "role": "fast OpenCV reference sensor",
+        "promotion": "verified for review sample, but not strong enough alone",
+    },
+    "classifier": {
+        "tier": "baseline",
+        "role": "local Hugging Face image-classification sensor",
+        "promotion": "primary ASDW classifier for the current baseline",
+    },
+    "clip": {
+        "tier": "candidate",
+        "role": "zero-shot image-text comparison sensor",
+        "promotion": "requires runtime and accuracy verification before baseline use",
+    },
+    "trocr": {
+        "tier": "candidate",
+        "role": "OCR sensor for text-like prompts",
+        "promotion": "requires runtime and latency verification before baseline use",
+    },
+    "owlvit": {
+        "tier": "candidate",
+        "role": "open-vocabulary detection sensor",
+        "promotion": "requires target localization verification before baseline use",
+    },
+}
 
 
 def env_float(name: str, default: float) -> float:
@@ -48,7 +80,59 @@ class PredictRequest(BaseModel):
         default=None,
         description="Enabled sensors: template, classifier, clip, trocr, owlvit.",
     )
+    boxes: list[tuple[int, int, int, int]] | None = Field(
+        default=None,
+        description="Optional external xyxy boxes. When provided, /predict skips built-in box detection.",
+    )
     debug: bool = False
+
+    @field_validator("boxes", mode="before")
+    @classmethod
+    def normalize_boxes_payload(cls, boxes: Any) -> Any:
+        if boxes is None:
+            return None
+        if isinstance(boxes, list) and boxes and all(not isinstance(item, (list, tuple)) for item in boxes):
+            if len(boxes) % 4 != 0:
+                raise ValueError("flat boxes must contain a multiple of four numbers")
+            return [boxes[index : index + 4] for index in range(0, len(boxes), 4)]
+        return boxes
+
+
+class GroundingElementInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    box: tuple[int, int, int, int] = Field(..., description="Element bbox in xyxy pixel coordinates.")
+    id: str | None = Field(default=None, max_length=200)
+    label: str | None = Field(default=None, max_length=200)
+    text: str | None = Field(default=None, max_length=500)
+    category: str | None = Field(default=None, max_length=200)
+    source: str | None = Field(default=None, max_length=200)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("id", "label", "text", "category", "source")
+    @classmethod
+    def normalize_optional_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+
+
+class GroundingReviewRequest(BaseModel):
+    image_b64: str = Field(..., description="PNG/JPEG image encoded as base64.")
+    instruction: str | None = Field(default=None, max_length=1000)
+    source: str = Field(default="external", max_length=200)
+    elements: list[GroundingElementInput] = Field(default_factory=list)
+    debug: bool = False
+
+    @field_validator("instruction", "source")
+    @classmethod
+    def normalize_text_fields(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
 
 
 class HealthResponse(BaseModel):
@@ -112,6 +196,10 @@ class LLMConfig(BaseModel):
     timeout_sec: float = Field(default_factory=lambda: env_float("ASDW_LLM_TIMEOUT_SEC", 20.0), ge=0.1, le=300.0)
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     max_tokens: int = Field(default=384, ge=64, le=4096)
+
+
+class LLMCheckConfig(LLMConfig):
+    timeout_sec: float = Field(default_factory=lambda: env_float("ASDW_LLM_CHECK_TIMEOUT_SEC", 2.0), ge=0.1, le=30.0)
 
 
 class AgentActionDecision(BaseModel):
@@ -199,6 +287,7 @@ class Detection:
     confidence: float
     box: tuple[int, int, int, int]
     votes: dict[str, dict[str, float]]
+    fused_scores: dict[str, float]
 
 
 @dataclass
@@ -627,7 +716,8 @@ class ModelHub:
     def detect_owlvit(self, image: Image.Image) -> list[tuple[str, float, tuple[int, int, int, int]]]:
         self.ensure_owlvit()
         torch = self.ensure_torch()
-        prompts = [[f'a blue button with letter {key}' for key in KEYS]]
+        prompt_labels = [f"a blue button with letter {key}" for key in KEYS]
+        prompts = [prompt_labels]
         inputs = self.owl_processor(
             text=prompts,
             images=image.convert("RGB"),
@@ -637,19 +727,31 @@ class ModelHub:
         with torch.no_grad():
             outputs = self.owl_model(**inputs)
         target_sizes = torch.tensor([image.size[::-1]], device=self.device)
-        results = self.owl_processor.post_process_object_detection(
-            outputs=outputs,
-            threshold=float(os.getenv("ASDW_OWLVIT_THRESHOLD", "0.05")),
-            target_sizes=target_sizes,
-        )[0]
+        threshold = float(os.getenv("ASDW_OWLVIT_THRESHOLD", "0.05"))
+        post_process = getattr(self.owl_processor, "post_process_object_detection", None)
+        if post_process is None:
+            post_process = self.owl_processor.post_process_grounded_object_detection
+            results = post_process(
+                outputs=outputs,
+                threshold=threshold,
+                target_sizes=target_sizes,
+                text_labels=prompts,
+            )[0]
+        else:
+            results = post_process(
+                outputs=outputs,
+                threshold=threshold,
+                target_sizes=target_sizes,
+            )[0]
         detections = []
+        labels = results.get("labels", results.get("text_labels", []))
         for score, label, box in zip(
-            results["scores"], results["labels"], results["boxes"], strict=False
+            results["scores"], labels, results["boxes"], strict=False
         ):
-            label_index = int(label.detach().cpu())
-            if label_index < len(KEYS):
+            key = owl_label_to_key(label, prompt_labels)
+            if key in KEYS:
                 x1, y1, x2, y2 = [int(round(v)) for v in box.detach().cpu().tolist()]
-                detections.append((KEYS[label_index], float(score.detach().cpu()), (x1, y1, x2, y2)))
+                detections.append((key, float(score.detach().cpu()), (x1, y1, x2, y2)))
         return detections
 
     def classify_asdw(self, image: Image.Image) -> SensorVote:
@@ -741,9 +843,9 @@ def poller_tick(config: PollerConfig) -> dict[str, Any]:
 
 
 @app.post("/llm/check")
-def llm_check(config: LLMConfig | None = None) -> dict[str, Any]:
+def llm_check(config: LLMCheckConfig | None = None) -> dict[str, Any]:
     if config is None:
-        config = LLMConfig(timeout_sec=env_float("ASDW_LLM_CHECK_TIMEOUT_SEC", 2.0))
+        config = LLMCheckConfig()
     return check_llm(config)
 
 
@@ -767,27 +869,79 @@ def daemon_status() -> dict[str, Any]:
     return build_agent_status()
 
 
+@app.get("/fusion/status")
+def fusion_status() -> dict[str, Any]:
+    return {
+        "ok": True,
+        "scope": "generic screen-prompt fusion boundary",
+        "labels": list(KEYS),
+        "device": MODEL_HUB.device,
+        "default_sensors": normalize_sensor_list(None),
+        "available_sensors": list(FUSION_SENSORS),
+        "baseline_sensors": list(BASELINE_FUSION_SENSORS),
+        "candidate_sensors": list(CANDIDATE_FUSION_SENSORS),
+        "sensor_roles": SENSOR_ROLES,
+        "evidence_endpoints": {
+            "/predict": "ASDW prompt classifier/fusion endpoint",
+            "/grounding/review": "generic external GUI bbox evidence review endpoint",
+        },
+        "loaded_sensors": sorted(MODEL_HUB.loaded),
+        "weights": fusion_weights(),
+        "models": {
+            "classifier": os.getenv(
+                "ASDW_CLASSIFIER_MODEL",
+                "/mnt/d/asdw-fusion-typer/models/asdw-mobilenetv3-classifier/best",
+            ),
+            "clip": os.getenv("ASDW_CLIP_MODEL", "openai/clip-vit-base-patch32"),
+            "trocr": os.getenv("ASDW_TROCR_MODEL", "microsoft/trocr-small-printed"),
+            "owlvit": os.getenv("ASDW_OWLVIT_MODEL", "google/owlvit-base-patch32"),
+        },
+        "note": "The runtime is not tied to one game; target-specific behavior belongs in prompts, ROI, sensors, and policy.",
+    }
+
+
+@app.post("/grounding/review")
+def grounding_review(request: GroundingReviewRequest) -> dict[str, Any]:
+    return review_grounding_request(request)
+
+
 @app.post("/predict")
 def predict(request: PredictRequest) -> dict[str, Any]:
     started = time.perf_counter()
     image = decode_image(request.image_b64)
     sensors = normalize_sensor_list(request.sensors)
 
-    boxes = find_button_boxes(image)
     owl_detections = MODEL_HUB.detect_owlvit(image) if "owlvit" in sensors else []
-    if not boxes and owl_detections:
-        boxes = [box for _, _, box in owl_detections]
+    if request.boxes is not None:
+        boxes = normalize_request_boxes(request.boxes, image.size)
+        box_source = "external"
+    else:
+        boxes = find_button_boxes(image)
+        box_source = "builtin"
+        if not boxes and owl_detections:
+            boxes = [box for _, _, box in owl_detections]
+            box_source = "owlvit"
 
     detections: list[Detection] = []
     for box in boxes:
         crop = crop_with_margin(image, box, margin=0.18)
         votes = classify_crop(crop, sensors)
         add_owl_votes(votes, box, owl_detections)
-        key, confidence = fuse_votes(votes)
-        detections.append(Detection(key=key, confidence=confidence, box=box, votes=votes))
+        fused_scores = fused_scores_from_votes(votes)
+        key, confidence = decision_from_fused_scores(fused_scores)
+        detections.append(
+            Detection(
+                key=key,
+                confidence=confidence,
+                box=box,
+                votes=votes,
+                fused_scores=fused_scores,
+            )
+        )
 
     detections.sort(key=lambda item: item.box[0])
-    sequence = [item.key for item in detections if item.confidence >= 0.30]
+    min_confidence = env_float("ASDW_SEQUENCE_MIN_CONFIDENCE", DEFAULT_SEQUENCE_MIN_CONFIDENCE)
+    sequence = [item.key for item in detections if item.confidence >= min_confidence]
     response: dict[str, Any] = {
         "sequence": sequence,
         "sequence_text": "".join(sequence),
@@ -797,17 +951,22 @@ def predict(request: PredictRequest) -> dict[str, Any]:
                 "confidence": round(item.confidence, 4),
                 "box": item.box,
                 "votes": item.votes,
+                "fused_scores": round_scores(item.fused_scores),
+                "sensor_keys": sensor_best_keys(item.votes),
             }
             for item in detections
         ],
+        "fusion": fusion_review_summary(detections, sensors, min_confidence),
         "latency_ms": round((time.perf_counter() - started) * 1000, 2),
         "sensors": sensors,
         "device": MODEL_HUB.device,
+        "box_source": box_source,
     }
     if request.debug:
         response["debug"] = {
             "image_size": image.size,
             "candidate_count": len(boxes),
+            "box_source": box_source,
             "owlvit": [
                 {"key": key, "confidence": score, "box": box}
                 for key, score, box in owl_detections
@@ -1216,9 +1375,9 @@ def openai_url(base_url: str, path: str) -> str:
 
 def normalize_sensor_list(sensors: list[str] | None) -> list[str]:
     if not sensors:
-        raw = os.getenv("ASDW_SENSORS", "template,clip")
+        raw = os.getenv("ASDW_SENSORS", "template,classifier")
         sensors = [item.strip() for item in raw.split(",") if item.strip()]
-    allowed = {"template", "classifier", "clip", "trocr", "owlvit"}
+    allowed = set(FUSION_SENSORS)
     selected = [sensor.lower() for sensor in sensors if sensor.lower() in allowed]
     return selected or ["template"]
 
@@ -1228,6 +1387,129 @@ def decode_image(image_b64: str) -> Image.Image:
         image_b64 = image_b64.split(",", 1)[1]
     data = base64.b64decode(image_b64)
     return Image.open(io.BytesIO(data)).convert("RGB")
+
+
+def normalize_request_boxes(
+    boxes: list[tuple[int, int, int, int]],
+    image_size: tuple[int, int],
+) -> list[tuple[int, int, int, int]]:
+    width, height = image_size
+    normalized: list[tuple[int, int, int, int]] = []
+    for box in boxes:
+        x1, y1, x2, y2 = [int(round(value)) for value in box]
+        x1 = max(0, min(width, x1))
+        x2 = max(0, min(width, x2))
+        y1 = max(0, min(height, y1))
+        y2 = max(0, min(height, y2))
+        if x2 <= x1 or y2 <= y1:
+            continue
+        normalized.append((x1, y1, x2, y2))
+    return sorted(normalized, key=lambda item: (item[0], item[1]))
+
+
+def review_grounding_request(request: GroundingReviewRequest) -> dict[str, Any]:
+    started = time.perf_counter()
+    image = decode_image(request.image_b64)
+    accepted: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+
+    for index, element in enumerate(request.elements):
+        boxes = normalize_request_boxes([element.box], image.size)
+        if not boxes:
+            rejected.append(
+                {
+                    "index": index,
+                    "id": element.id,
+                    "box": list(element.box),
+                    "reason": "box is outside image bounds or has no area",
+                }
+            )
+            continue
+        box = boxes[0]
+        accepted.append(grounding_element_evidence(index, element, box, image, request.instruction))
+
+    return {
+        "ok": True,
+        "scope": "generic GUI grounding evidence review",
+        "source": request.source,
+        "instruction": request.instruction,
+        "image_size": {"width": image.size[0], "height": image.size[1]},
+        "element_count": len(request.elements),
+        "accepted_count": len(accepted),
+        "rejected_count": len(rejected),
+        "elements": accepted,
+        "rejected_elements": rejected,
+        "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+        "note": "This endpoint reviews external GUI element boxes; it does not classify ASDW keys or send input.",
+    }
+
+
+def grounding_element_evidence(
+    index: int,
+    element: GroundingElementInput,
+    box: tuple[int, int, int, int],
+    image: Image.Image,
+    instruction: str | None,
+) -> dict[str, Any]:
+    x1, y1, x2, y2 = box
+    width, height = image.size
+    box_width = x2 - x1
+    box_height = y2 - y1
+    element_text = " ".join(
+        item for item in [element.label, element.text, element.category] if item
+    )
+    return {
+        "index": index,
+        "id": element.id,
+        "label": element.label,
+        "text": element.text,
+        "category": element.category,
+        "source": element.source,
+        "confidence": element.confidence,
+        "box": list(box),
+        "box_norm_xyxy": [
+            round(x1 / width, 6),
+            round(y1 / height, 6),
+            round(x2 / width, 6),
+            round(y2 / height, 6),
+        ],
+        "center_xy": [round((x1 + x2) / 2), round((y1 + y2) / 2)],
+        "size": {"width": box_width, "height": box_height},
+        "area_ratio": round((box_width * box_height) / max(width * height, 1), 8),
+        "instruction_overlap": text_overlap(instruction, element_text),
+        "crop": crop_summary(image, box),
+        "metadata": element.metadata,
+    }
+
+
+def crop_summary(image: Image.Image, box: tuple[int, int, int, int]) -> dict[str, Any]:
+    crop = image.crop(box).convert("RGB")
+    arr = np.asarray(crop, dtype=np.float32)
+    if arr.size == 0:
+        return {"width": 0, "height": 0, "mean_rgb": [0.0, 0.0, 0.0], "brightness": 0.0}
+    mean_rgb = arr.reshape(-1, 3).mean(axis=0)
+    return {
+        "width": crop.size[0],
+        "height": crop.size[1],
+        "mean_rgb": [round(float(value), 3) for value in mean_rgb],
+        "brightness": round(float(mean_rgb.mean() / 255.0), 6),
+    }
+
+
+def text_overlap(left: str | None, right: str | None) -> dict[str, Any]:
+    left_tokens = tokenize_text(left)
+    right_tokens = tokenize_text(right)
+    if not left_tokens or not right_tokens:
+        return {"score": 0.0, "tokens": []}
+    shared = sorted(left_tokens & right_tokens)
+    score = len(shared) / max(len(left_tokens), 1)
+    return {"score": round(score, 4), "tokens": shared}
+
+
+def tokenize_text(value: str | None) -> set[str]:
+    if not value:
+        return set()
+    return {token for token in re.findall(r"[a-z0-9_]+", value.lower()) if len(token) > 1}
 
 
 def find_button_boxes(image: Image.Image) -> list[tuple[int, int, int, int]]:
@@ -1430,29 +1712,111 @@ def add_owl_votes(
     votes["owlvit"] = normalize_scores(scores)
 
 
+def owl_label_to_key(label: Any, prompt_labels: list[str]) -> str:
+    if hasattr(label, "detach"):
+        label_index = int(label.detach().cpu())
+        return KEYS[label_index] if 0 <= label_index < len(KEYS) else "?"
+    if isinstance(label, (int, np.integer)):
+        return KEYS[int(label)] if 0 <= int(label) < len(KEYS) else "?"
+    text = str(label).upper()
+    for key, prompt in zip(KEYS, prompt_labels, strict=True):
+        if text == prompt.upper() or text.endswith(f" {key}") or text == key:
+            return key
+    for key in KEYS:
+        if key in text.split():
+            return key
+    return "?"
+
+
 def fuse_votes(votes: dict[str, dict[str, float]]) -> tuple[str, float]:
-    weights = {
+    return decision_from_fused_scores(fused_scores_from_votes(votes))
+
+
+def fused_scores_from_votes(votes: dict[str, dict[str, float]]) -> dict[str, float]:
+    weights = fusion_weights()
+    fused = {key: 0.0 for key in KEYS}
+    total_weight = 0.0
+    for sensor, scores in votes.items():
+        weight = weights.get(sensor, 1.0)
+        if weight <= 0:
+            continue
+        total_weight += weight
+        for key in KEYS:
+            fused[key] += weight * float(scores.get(key, 0.0))
+    if total_weight <= 0:
+        return {key: 0.0 for key in KEYS}
+    return {key: value / total_weight for key, value in fused.items()}
+
+
+def decision_from_fused_scores(fused_scores: dict[str, float]) -> tuple[str, float]:
+    if not fused_scores or max(fused_scores.values(), default=0.0) <= 0:
+        return "?", 0.0
+    best_key = max(fused_scores, key=fused_scores.get)
+    sorted_scores = sorted(fused_scores.values(), reverse=True)
+    margin = sorted_scores[0] - sorted_scores[1] if len(sorted_scores) > 1 else sorted_scores[0]
+    confidence = max(0.0, min(1.0, sorted_scores[0] * 0.75 + margin * 0.50))
+    return best_key, float(confidence)
+
+
+def fusion_review_summary(
+    detections: list[Detection],
+    sensors: list[str],
+    min_confidence: float,
+) -> dict[str, Any]:
+    sensor_sequences: dict[str, str] = {}
+    for sensor in sensors:
+        sensor_sequences[sensor] = "".join(
+            sensor_best_keys(item.votes).get(sensor, "?") for item in detections
+        )
+
+    disagreements = []
+    agreement_positions = 0
+    for index, item in enumerate(detections):
+        sensor_keys = sensor_best_keys(item.votes)
+        concrete_keys = [key for key in sensor_keys.values() if key in KEYS]
+        agrees = bool(concrete_keys) and all(key == item.key for key in concrete_keys)
+        if agrees:
+            agreement_positions += 1
+        if not agrees or item.confidence < min_confidence:
+            disagreements.append(
+                {
+                    "index": index,
+                    "box": item.box,
+                    "fused_key": item.key,
+                    "confidence": round(item.confidence, 4),
+                    "sensor_keys": sensor_keys,
+                }
+            )
+
+    return {
+        "sequence_min_confidence": round(min_confidence, 4),
+        "accepted_count": sum(1 for item in detections if item.confidence >= min_confidence),
+        "rejected_count": sum(1 for item in detections if item.confidence < min_confidence),
+        "sensor_sequences": sensor_sequences,
+        "agreement_rate": round(agreement_positions / len(detections), 4) if detections else 0.0,
+        "disagreements": disagreements,
+    }
+
+
+def sensor_best_keys(votes: dict[str, dict[str, float]]) -> dict[str, str]:
+    best: dict[str, str] = {}
+    for sensor, scores in votes.items():
+        best[sensor] = max(scores, key=scores.get) if scores else "?"
+    return best
+
+
+def round_scores(scores: dict[str, float]) -> dict[str, float]:
+    return {key: round(float(scores.get(key, 0.0)), 6) for key in KEYS}
+
+
+def fusion_weights() -> dict[str, float]:
+    return {
         "template": float(os.getenv("ASDW_WEIGHT_TEMPLATE", "0.35")),
         "classifier": float(os.getenv("ASDW_WEIGHT_CLASSIFIER", "1.25")),
         "clip": float(os.getenv("ASDW_WEIGHT_CLIP", "1.00")),
         "trocr": float(os.getenv("ASDW_WEIGHT_TROCR", "1.10")),
         "owlvit": float(os.getenv("ASDW_WEIGHT_OWLVIT", "0.50")),
     }
-    fused = {key: 0.0 for key in KEYS}
-    total_weight = 0.0
-    for sensor, scores in votes.items():
-        weight = weights.get(sensor, 1.0)
-        total_weight += weight
-        for key in KEYS:
-            fused[key] += weight * float(scores.get(key, 0.0))
-    if total_weight <= 0:
-        return "?", 0.0
-    fused = {key: value / total_weight for key, value in fused.items()}
-    best_key = max(fused, key=fused.get)
-    sorted_scores = sorted(fused.values(), reverse=True)
-    margin = sorted_scores[0] - sorted_scores[1] if len(sorted_scores) > 1 else sorted_scores[0]
-    confidence = max(0.0, min(1.0, sorted_scores[0] * 0.75 + margin * 0.50))
-    return best_key, float(confidence)
 
 
 def normalize_scores(scores: dict[str, float]) -> dict[str, float]:

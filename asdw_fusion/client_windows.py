@@ -134,7 +134,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--sensors",
-        default="template,clip",
+        default="template,classifier",
         help="Comma-separated sensors sent to the server.",
     )
     parser.add_argument("--interval", type=float, default=0.08)

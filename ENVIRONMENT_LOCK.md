@@ -114,10 +114,10 @@ SGLang 자체 버전은 이 repo venv 안에서 검증되지 않았습니다. LL
 아래 후보는 현재 필수 스택이 아닙니다. 기본 운영 경로를 대체하지 않는 단순 추가라면 설치하지 않습니다.
 
 ```text
-pywinctl
-pywinauto
-pydirectinput-rgx
-dxcam
+pywinctl==0.4.1
+pywinauto==0.6.9
+pydirectinput-rgx==2.1.3
+dxcam==0.3.0
 windows-capture
 ```
 
@@ -128,6 +128,7 @@ windows-capture
 - baseline target state: builtin Win32 APIs
 - optional provider는 실제 문제와 필요가 확인될 때만 실험합니다.
 - optional provider 실험 결과가 좋아도, LLM보다 무거운 입력 부서가 되면 baseline으로 승격하지 않습니다.
+- current Windows venv note: `PyDirectInput==1.0.4` is installed and `/providers` can detect `pydirectinput`, but it is not part of `requirements-windows.txt`, not the `pydirectinput-rgx` candidate, and not live-verified.
 
 ## Verification Status
 
@@ -143,6 +144,30 @@ windows-capture
 | WSL Python/tooling | Verified | `Python 3.12.3`, `pip 26.1.2` |
 | WSL server import/compile | Verified | `.venv-wsl` import and `py_compile` passed |
 | WSL ROCm visibility | Verified with warning | `torch.cuda.is_available() == True`, device `AMD Radeon RX 6600 XT`; driver-old warning observed |
+| WSL ROCm GPU server smoke | Verified one-shot | temporary WSL server on port `7869` ran `POST /predict` with `template,classifier`; `prediction.device == cuda`, post-predict status `device == cuda`, sequence `SDWWDWDAA`; first load latency about `44.2s` |
+| Fusion server health | Verified | `GET /health` returned `ok=true`, `cv2=true`; current background review server reports `device=cpu` |
+| Fusion status endpoint | Verified | `GET /fusion/status` exposes baseline/candidate sensors, evidence endpoints, roles, weights, loaded models, model paths, and runtime device |
+| Fusion review summary | Verified | `POST /predict` includes `fusion.sensor_sequences`, `agreement_rate`, `disagreements`, per-detection `sensor_keys`, and `fused_scores` |
+| Fusion review report harness | Verified | `scripts/review_fusion_server.py --include-candidates` wrote `artifacts/fusion-review/latest/report.md` and `report.json`; it only calls `/fusion/status` and `/predict` |
+| Fusion review bundle | Verified | Windows `.venv-win` ran `scripts/build_fusion_review_bundle.py`; it wrote `artifacts/fusion-review-bundle/latest/report.md` and safe-probed status endpoints without calling input endpoints |
+| Fusion readiness audit | Verified | Windows `.venv-win` ran `scripts/audit_fusion_readiness.py`; `29/29` checks passed and wrote `artifacts/fusion-readiness-audit/latest/report.md` |
+| Fusion contract verifier | Verified | WSL `.venv-wsl` ran `scripts/verify_fusion_contracts.py`; `19/19` contracts passed and wrote `artifacts/fusion-contract/latest/report.md` |
+| Agent policy HTTP smoke | Verified | Windows `.venv-win` ran `scripts/smoke_agent_policy.py`; `4/4` cases passed for observe skip, rehearse dry-run, live guard, and low-confidence block without capture, LLM call, or live input |
+| Generic grounding review endpoint | Verified | `POST /grounding/review` accepted external GUI bbox evidence and returned normalized box, crop summary, area ratio, and instruction overlap without model loading or input |
+| GUI dataset metadata readiness | Verified metadata only | WSL `.venv-wsl` ran `scripts/gui_dataset_readiness.py`; Hugging Face metadata was inspected for ScreenSpot, ScreenSpot-Pro, GroundCUA, RICO-ScreenQA, and UI-Elements without large downloads |
+| ScreenSpot-Pro tiny external-box flow | Verified flow, not accuracy | WSL `.venv-wsl` ran `scripts/review_screenspot_pro_tiny.py --max-samples 2`; two high-resolution GUI samples used `/grounding/review` and external `boxes` in `/predict`, then wrote overlays/report without input endpoints |
+| UI-Elements tiny grounding flow | Verified flow, not provider accuracy | WSL `.venv-wsl` ran `scripts/review_ui_elements_tiny.py --max-samples 2 --max-elements 12`; 14 YOLO UI element boxes across two web samples were accepted by `/grounding/review` and overlays/report were written without `/predict` or input endpoints |
+| GroundCUA tiny grounding flow | Verified flow, not provider accuracy | WSL `.venv-wsl` ran `scripts/review_groundcua_tiny.py --max-samples 2 --max-elements 20`; 29 desktop UI annotation boxes across OBS Studio and Calibre samples were accepted by `/grounding/review` and overlays/report were written without `/predict` or input endpoints |
+| LLM check offline guard | Verified safe failure | With no SGLang server on `127.0.0.1:8000`, `POST /llm/check` returns `ok=false` after the check timeout and `/agent/status` exposes the LLM error without sending input |
+| External box prediction path | Verified | `POST /predict` accepts optional `boxes`; used label boxes on 20 synthetic samples without calling input endpoints |
+| Template-only prediction | Verified | `template` returned 9 detections on `detection-bboxes-clean.png`; raw sensor sequence was `AASSAWAAA`, accepted sequence was incorrect `AASSAAAA` |
+| Classifier prediction | Verified | `classifier` returned `SDWWDWDAA` after first model load |
+| Template+classifier fusion | Verified | `template,classifier` returned `SDWWDWDAA`; observed warm server latency was about 0.10-0.18s on CPU review server |
+| Dataset with built-in detector | Verified limitation | 20 synthetic samples returned `0/20` sequence accuracy and `0/20` exact detection count; detector is layout-specific |
+| Dataset with external label boxes | Verified | 20 synthetic samples returned `19/20` sequence accuracy and `20/20` exact detection count with `template,classifier` |
+| CLIP candidate runtime | Verified, not baseline | `clip` returned `SDWWSWDAA`; warm reports were about 1.0-1.5s, one observed wrong key |
+| TrOCR candidate runtime | Verified, not baseline | `trocr` returned no accepted sequence; raw sensor sequence `AAAAAAAAA`; warm reports were about 1.5-1.9s |
+| OWL-ViT candidate runtime | Verified, not baseline | compatibility fallback added for Transformers `post_process_grounded_object_detection`; returned no accepted sequence; warm reports were about 0.5s |
 
 미검증:
 
@@ -153,8 +178,16 @@ windows-capture
 | Optional capture provider | Not verified | `dxcam` not promoted to baseline |
 | Optional accessibility provider | Not verified | `pywinauto` UIA snapshot not implemented as baseline |
 | Long-running daemon stability | Not verified | needs separate soak test |
+| Long-running GPU server stability | Not verified | GPU one-shot smoke passed; soak and warm-latency distribution not measured |
 | Game/app-specific compatibility | Not verified | needs per-target scenario test |
 | SGLang server runtime version | Not verified in repo venv | only OpenAI-compatible endpoint contract is assumed |
+| Candidate sensor generalization | Not verified | CLIP/TrOCR/OWL-ViT were only smoke-tested on the review sample and are not promoted to baseline |
+| Non-Minecraft GUI grounding accuracy | Not verified | ScreenSpot-Pro, UI-Elements, and GroundCUA tiny flows exist, but they validate evidence plumbing, not real provider accuracy or task success |
+
+Known caveat:
+
+- A direct one-off classifier load outside `scripts/run_server_wsl.ps1` hit a ROCm SDMA assertion. Treat direct ad-hoc ROCm commands without the runtime flags as invalid verification.
+- The current background review server exposes latest `/fusion/status`, but classifier inference can be observed on CPU when launched through hidden Windows `Start-Process`. The separate GPU smoke report is the source of truth for the one-shot ROCm server check. It does not replace a long-running GPU soak test.
 
 ## Drift Check Commands
 
@@ -164,7 +197,7 @@ Windows:
 .\.venv-win\Scripts\python.exe --version
 .\.venv-win\Scripts\python.exe -m pip --version
 .\.venv-win\Scripts\python.exe -m pip freeze --all
-.\.venv-win\Scripts\python.exe -m py_compile .\asdw_fusion\windows_capture_daemon.py .\asdw_fusion\server.py .\asdw_fusion\client_windows.py
+.\.venv-win\Scripts\python.exe -m py_compile .\asdw_fusion\windows_capture_daemon.py .\asdw_fusion\server.py .\asdw_fusion\client_windows.py .\scripts\review_fusion_server.py .\scripts\verify_fusion_contracts.py .\scripts\gui_dataset_readiness.py .\scripts\review_screenspot_pro_tiny.py .\scripts\review_ui_elements_tiny.py .\scripts\review_groundcua_tiny.py .\scripts\build_fusion_review_bundle.py .\scripts\audit_fusion_readiness.py .\scripts\smoke_agent_policy.py .\scripts\smoke_server_wsl_gpu.py
 ```
 
 WSL:
@@ -172,7 +205,7 @@ WSL:
 ```powershell
 wsl -d Ubuntu-24.04-ROCmLab -- bash -lc "cd /mnt/d/asdw-fusion-typer && .venv-wsl/bin/python --version"
 wsl -d Ubuntu-24.04-ROCmLab -- bash -lc "cd /mnt/d/asdw-fusion-typer && .venv-wsl/bin/python -m pip freeze --all"
-wsl -d Ubuntu-24.04-ROCmLab -- bash -lc "cd /mnt/d/asdw-fusion-typer && .venv-wsl/bin/python -m py_compile asdw_fusion/server.py asdw_fusion/client_windows.py"
+wsl -d Ubuntu-24.04-ROCmLab -- bash -lc "cd /mnt/d/asdw-fusion-typer && .venv-wsl/bin/python -m py_compile asdw_fusion/server.py asdw_fusion/client_windows.py scripts/review_fusion_server.py scripts/verify_fusion_contracts.py scripts/gui_dataset_readiness.py scripts/review_screenspot_pro_tiny.py scripts/review_ui_elements_tiny.py scripts/review_groundcua_tiny.py scripts/build_fusion_review_bundle.py scripts/audit_fusion_readiness.py scripts/smoke_agent_policy.py scripts/smoke_server_wsl_gpu.py"
 ```
 
 ROCm:
