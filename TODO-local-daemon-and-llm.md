@@ -86,6 +86,35 @@ LLM은 비전 분류기가 아니라 action 컨트롤러입니다. 현재 구현
 - `GET /daemon/status`
   - TODO 호환 alias
 
+## 구현된 provider API
+
+기본 운영 경로는 계속 `builtin` 입력과 `mss` 캡처입니다. 강한 provider는 optional dependency로 두고 실패해도 데몬이 죽지 않게 구성했습니다.
+
+- optional dependency 파일
+  - `requirements-windows-strong.txt`
+  - 포함: `pywinctl`, `pywinauto`, `pydirectinput-rgx`, `dxcam`
+  - `windows-capture`는 주석 처리된 실험 후보
+- `GET /providers`
+  - window/input/capture/accessibility provider capability 반환
+- target registry
+  - `GET /targets`
+  - `POST /targets/select`
+  - `GET /targets/current`
+  - `POST /targets/refresh`
+  - PyWinCtl 우선, 실패 시 builtin Win32 fallback
+- input provider
+  - `POST /keys/press`에 `provider = builtin|pydirectinput`
+  - dry-run은 provider 설치 여부와 무관하게 큐/타이밍만 검증
+  - 한글/IME `type_text`는 builtin 유지
+- capture provider
+  - `/frame`, `/stream`, `/frame_base64`, `/predict_once`에 `provider = mss|dxcam|windows_capture`
+  - `dxcam`은 ROI/target region 캡처 후보
+  - `windows_capture`는 등록된 실험 후보이며 기본 실행 provider로는 아직 미연결
+- agent 연동
+  - `/agent/step`은 frame metadata에 provider/target/region을 포함
+  - `/agent/act`는 `target_id`가 stale이면 입력 실행 전 차단
+  - press action은 `input_provider`를 daemon `/keys/press`로 전달
+
 ## 추가 상태체크 로직
 
 남은 운영 고정 시 다음 상태체크를 더 구체화합니다.
@@ -164,6 +193,12 @@ LLM은 비전 분류기가 아니라 action 컨트롤러입니다. 현재 구현
   - 현재 설정 조회
 - agent prompt/profile 버전 노출
 - 마지막 LLM raw error와 schema validation error의 요약 노출
+- `pywinauto` UIA snapshot endpoint
+  - `GET /targets/{id}/uia`
+  - 브라우저/앱/런처/설정창 계열에 한정
+- `windows_capture` HWND/HMONITOR provider 실험
+  - Rust/Python 패키징 확인
+  - `capture_target` 실험 endpoint에서만 사용 후 기본 provider 승격 판단
 
 ## 로컬 LLM 백엔드 후보
 

@@ -1,0 +1,8 @@
+# Optional stronger Windows providers. The daemon keeps working without these.
+pywinctl
+pywinauto
+pydirectinput-rgx
+dxcam
+
+# Experimental candidate for a future HWND/HMONITOR capture provider:
+# windows-capture

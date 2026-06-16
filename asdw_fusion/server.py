@@ -65,10 +65,13 @@ class PollerConfig(BaseModel):
     interval_sec: float = Field(default=5.0, ge=0.5)
     monitor: int = Field(default=1, ge=0)
     roi: str | None = Field(default=None)
+    capture_provider: Literal["mss", "dxcam", "windows_capture"] = "mss"
+    target_id: str | None = Field(default=None)
     sensors: list[str] = Field(default_factory=lambda: ["template", "classifier"])
     min_confidence: float = Field(default=0.30, ge=0.0, le=1.0)
     dry_run: bool = False
     debug: bool = False
+    input_provider: Literal["builtin", "pydirectinput"] = "builtin"
     press_endpoint: str = "/keys/press"
     keep_daemon_queue: bool = False
     daemon_wait: bool = True
@@ -167,6 +170,8 @@ class AgentStepRequest(BaseModel):
     daemon_url: str = Field(default_factory=lambda: os.getenv("ASDW_DAEMON_URL", DEFAULT_DAEMON_URL))
     monitor: int = Field(default=1, ge=0)
     roi: str | None = Field(default=None)
+    capture_provider: Literal["mss", "dxcam", "windows_capture"] = "mss"
+    target_id: str | None = Field(default=None)
     sensors: list[str] = Field(default_factory=lambda: ["template", "classifier"])
     debug: bool = False
     mode: Literal["observe", "rehearse", "live"] = "observe"
@@ -182,6 +187,7 @@ class AgentStepRequest(BaseModel):
 class AgentActRequest(AgentStepRequest):
     allow_live_input: bool = False
     decision: AgentActionDecision | None = None
+    input_provider: Literal["builtin", "pydirectinput"] = "builtin"
     keep_daemon_queue: bool = False
     daemon_wait: bool = True
     daemon_timeout_sec: float = Field(default=30.0, ge=0.1, le=300.0)
@@ -274,9 +280,11 @@ class DaemonPoller:
             self._stop.wait(wait_sec)
 
     def _poll_once(self, config: PollerConfig) -> dict[str, Any]:
-        frame_params: dict[str, Any] = {"monitor": config.monitor}
+        frame_params: dict[str, Any] = {"monitor": config.monitor, "provider": config.capture_provider}
         if config.roi:
             frame_params["roi"] = config.roi
+        if config.target_id:
+            frame_params["target_id"] = config.target_id
         frame_response = requests.post(
             f"{config.daemon_url.rstrip('/')}/frame_base64",
             params=frame_params,
@@ -306,6 +314,7 @@ class DaemonPoller:
                 json={
                     "keys": keys,
                     "dry_run": config.dry_run,
+                    "provider": config.input_provider,
                     "queue": {
                         "keep_queue": config.keep_daemon_queue,
                         "wait": config.daemon_wait,
@@ -325,6 +334,9 @@ class DaemonPoller:
                 "height": frame.get("height"),
                 "roi": frame.get("roi"),
                 "full_monitor": frame.get("full_monitor"),
+                "provider": frame.get("provider"),
+                "target": frame.get("target"),
+                "region": frame.get("region"),
             },
             "prediction": {
                 "sequence_text": prediction.get("sequence_text"),
@@ -841,7 +853,13 @@ def run_agent_step(request: AgentStepRequest) -> dict[str, Any]:
     prediction: dict[str, Any] | None = None
 
     try:
-        frame = fetch_daemon_frame(request.daemon_url, request.monitor, request.roi)
+        frame = fetch_daemon_frame(
+            request.daemon_url,
+            request.monitor,
+            request.roi,
+            request.capture_provider,
+            request.target_id,
+        )
         prediction = predict(
             PredictRequest(
                 image_b64=str(frame["image_b64"]),
@@ -908,6 +926,7 @@ def run_agent_act(request: AgentActRequest) -> dict[str, Any]:
                 exclude={
                     "allow_live_input",
                     "decision",
+                    "input_provider",
                     "keep_daemon_queue",
                     "daemon_wait",
                     "daemon_timeout_sec",
@@ -948,10 +967,18 @@ def run_agent_act(request: AgentActRequest) -> dict[str, Any]:
     return result
 
 
-def fetch_daemon_frame(daemon_url: str, monitor: int, roi: str | None) -> dict[str, Any]:
-    params: dict[str, Any] = {"monitor": monitor}
+def fetch_daemon_frame(
+    daemon_url: str,
+    monitor: int,
+    roi: str | None,
+    capture_provider: str,
+    target_id: str | None,
+) -> dict[str, Any]:
+    params: dict[str, Any] = {"monitor": monitor, "provider": capture_provider}
     if roi:
         params["roi"] = roi
+    if target_id:
+        params["target_id"] = target_id
     response = requests.post(f"{daemon_url.rstrip('/')}/frame_base64", params=params, timeout=10)
     response.raise_for_status()
     return response.json()
@@ -1069,6 +1096,9 @@ def execute_agent_decision(decision: AgentActionDecision, request: AgentActReque
         return {"ok": True, "status": "skipped", "reason": "observe mode never sends input"}
     if request.mode == "live" and not request.allow_live_input:
         return {"ok": False, "status": "blocked", "reason": "live mode requires allow_live_input=true"}
+    target_guard = check_target_guard(request)
+    if target_guard is not None:
+        return target_guard
 
     dry_run = request.mode != "live"
     queue = {
@@ -1078,7 +1108,12 @@ def execute_agent_decision(decision: AgentActionDecision, request: AgentActReque
     }
     if decision.action == "press_sequence":
         endpoint = "/keys/press"
-        body: dict[str, Any] = {"keys": decision.keys, "dry_run": dry_run, "queue": queue}
+        body: dict[str, Any] = {
+            "keys": decision.keys,
+            "dry_run": dry_run,
+            "provider": request.input_provider,
+            "queue": queue,
+        }
     else:
         endpoint = "/text/type_keys"
         body = {"text": decision.text, "dry_run": dry_run, "queue": queue}
@@ -1094,6 +1129,25 @@ def execute_agent_decision(decision: AgentActionDecision, request: AgentActReque
     except Exception as exc:
         return {"ok": False, "status": "failed", "dry_run": dry_run, "error": str(exc)}
     return {"ok": bool(payload.get("ok", False)), "status": payload.get("status", "completed"), "dry_run": dry_run, "daemon": payload}
+
+
+def check_target_guard(request: AgentActRequest) -> dict[str, Any] | None:
+    if not request.target_id:
+        return None
+    try:
+        response = requests.post(
+            f"{request.daemon_url.rstrip('/')}/targets/refresh",
+            json={"target_id": request.target_id},
+            timeout=2,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:
+        return {"ok": False, "status": "blocked", "reason": f"target guard failed: {exc}"}
+    target = payload.get("target") if isinstance(payload, dict) else None
+    if not target or target.get("is_stale"):
+        return {"ok": False, "status": "blocked", "reason": "target is stale", "target": target}
+    return None
 
 
 def build_agent_status() -> dict[str, Any]:
@@ -1135,6 +1189,9 @@ def frame_metadata(frame: dict[str, Any] | None) -> dict[str, Any] | None:
         "height": frame.get("height"),
         "roi": frame.get("roi"),
         "full_monitor": frame.get("full_monitor"),
+        "provider": frame.get("provider"),
+        "target": frame.get("target"),
+        "region": frame.get("region"),
     }
 
 

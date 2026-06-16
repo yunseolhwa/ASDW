@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import importlib
+import importlib.util
 import io
 import json
 import random
@@ -9,6 +11,7 @@ import threading
 import time
 import uuid
 from collections import deque
+from ctypes import wintypes
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from typing import Annotated, Any
@@ -24,6 +27,10 @@ from pydantic import BaseModel, Field
 
 DEFAULT_MODEL_URL = "http://127.0.0.1:7868/predict"
 VALID_KEYS = {"A", "S", "D", "W"}
+INPUT_PROVIDERS = {"builtin", "pydirectinput"}
+CAPTURE_PROVIDERS = {"mss", "dxcam", "windows_capture"}
+WINDOW_PROVIDERS = {"auto", "builtin", "pywinctl"}
+SW_RESTORE = 9
 WM_IME_CONTROL = 0x0283
 IMC_GETOPENSTATUS = 0x0005
 IMC_SETOPENSTATUS = 0x0006
@@ -309,6 +316,34 @@ class DryRunInputAdapter(InputAdapter):
         time.sleep(hold)
 
 
+class PyDirectInputAdapter(InputAdapter):
+    name = "pydirectinput"
+
+    def __init__(self) -> None:
+        self.module = load_pydirectinput()
+
+    def press(self, key: str, hold: float) -> None:
+        modifiers, key_name = split_key_chord(key)
+        key_name = key_name.lower() if len(key_name) == 1 else key_name
+        if hasattr(self.module, "keyDown") and hasattr(self.module, "keyUp"):
+            for modifier in modifiers:
+                self.module.keyDown(normalize_pydirectinput_key(modifier))
+            try:
+                self.module.keyDown(normalize_pydirectinput_key(key_name))
+                time.sleep(hold)
+                self.module.keyUp(normalize_pydirectinput_key(key_name))
+            finally:
+                for modifier in reversed(modifiers):
+                    self.module.keyUp(normalize_pydirectinput_key(modifier))
+            return
+        if modifiers:
+            raise RuntimeError("pydirectinput provider does not expose keyDown/keyUp for key chords")
+        if not hasattr(self.module, "press"):
+            raise RuntimeError("pydirectinput provider does not expose press/keyDown/keyUp")
+        self.module.press(normalize_pydirectinput_key(key_name))
+        time.sleep(hold)
+
+
 @dataclass(frozen=True)
 class Roi:
     left: float
@@ -336,6 +371,8 @@ class PredictOnceRequest(BaseModel):
         default=None,
         description="Optional normalized 'left top right bottom'. Omit to send the full monitor.",
     )
+    capture_provider: str = Field(default="mss", description="mss, dxcam, or windows_capture.")
+    target_id: str | None = Field(default=None, description="Optional selected window target id, e.g. hwnd:1234.")
     sensors: list[str] = Field(default_factory=lambda: ["template", "classifier"])
     debug: bool = False
 
@@ -357,6 +394,7 @@ class QueueOptions(BaseModel):
 class PressKeysRequest(BaseModel):
     keys: list[str] | str
     dry_run: bool = False
+    provider: str = Field(default="builtin", description="builtin or pydirectinput.")
     timing: HumanTiming = Field(default_factory=HumanTiming)
     queue: QueueOptions = Field(default_factory=QueueOptions)
 
@@ -372,8 +410,17 @@ class TypeTextKeysRequest(BaseModel):
 class PredictAndPressRequest(PredictOnceRequest):
     dry_run: bool = False
     min_confidence: float = Field(default=0.30, ge=0.0, le=1.0)
+    input_provider: str = Field(default="builtin", description="builtin or pydirectinput.")
     timing: HumanTiming = Field(default_factory=HumanTiming)
     queue: QueueOptions = Field(default_factory=QueueOptions)
+
+
+class TargetSelectRequest(BaseModel):
+    target_id: str | None = None
+    window_id: int | None = None
+    title_contains: str | None = None
+    provider: str = "auto"
+    activate: bool = False
 
 
 @dataclass
@@ -524,18 +571,62 @@ class CaptureDaemon:
         with mss.mss() as screen:
             return [dict(monitor) for monitor in screen.monitors]
 
-    def capture(self, monitor_index: int, roi: Roi | None = None) -> Image.Image:
+    def capture(
+        self,
+        monitor_index: int,
+        roi: Roi | None = None,
+        provider: str = "mss",
+        target_id: str | None = None,
+    ) -> Image.Image:
+        image, _ = self.capture_with_metadata(monitor_index, roi, provider, target_id)
+        return image
+
+    def capture_with_metadata(
+        self,
+        monitor_index: int,
+        roi: Roi | None = None,
+        provider: str = "mss",
+        target_id: str | None = None,
+    ) -> tuple[Image.Image, dict[str, Any]]:
+        provider_name = normalize_capture_provider(provider)
+        if target_id:
+            target = get_target_by_id(target_id)
+            if target.get("is_stale"):
+                raise RuntimeError(f"target {target_id} is stale or unavailable")
+            bounds = target.get("bounds") or {}
+            region = {
+                "left": int(bounds["left"]),
+                "top": int(bounds["top"]),
+                "width": int(bounds["width"]),
+                "height": int(bounds["height"]),
+            }
+            region = monitor_to_region(region, roi)
+            image = self._capture_region(provider_name, monitor_index, region)
+            return image, capture_metadata(provider_name, monitor_index, roi, region, target)
+
         with mss.mss() as screen:
             if monitor_index >= len(screen.monitors):
                 raise ValueError(f"monitor {monitor_index} is not available")
             monitor = screen.monitors[monitor_index]
             region = monitor_to_region(monitor, roi)
-            shot = screen.grab(region)
-            return Image.frombytes("RGB", shot.size, shot.rgb)
+        image = self._capture_region(provider_name, monitor_index, region)
+        return image, capture_metadata(provider_name, monitor_index, roi, region, None)
+
+    def _capture_region(self, provider: str, monitor_index: int, region: dict[str, int]) -> Image.Image:
+        if provider == "mss":
+            with mss.mss() as screen:
+                shot = screen.grab(region)
+                return Image.frombytes("RGB", shot.size, shot.rgb)
+        if provider == "dxcam":
+            return capture_region_dxcam(monitor_index, region)
+        raise RuntimeError("windows_capture is registered as experimental but is not wired as a default daemon provider")
 
 
 daemon = CaptureDaemon()
 KEYBOARD_ADAPTER = SendInputKeyboardAdapter()
+PYDIRECTINPUT_ADAPTER: PyDirectInputAdapter | None = None
+selected_target_lock = threading.Lock()
+selected_target_id: str | None = None
 input_jobs = InputJobQueue()
 app = FastAPI(title="ASDW Windows Capture Daemon", version="0.1.0")
 app.add_middleware(
@@ -558,6 +649,8 @@ def health() -> dict[str, Any]:
         "input_state": get_input_state(),
         "input_queue": input_jobs.status(),
         "capabilities": daemon_capabilities(),
+        "providers": provider_capabilities(),
+        "selected_target": get_selected_target(),
         "privilege": privilege_status(),
         "input_adapter": KEYBOARD_ADAPTER.name,
     }
@@ -571,6 +664,8 @@ def ping() -> dict[str, Any]:
         "uptime_sec": round(time.time() - daemon.started_at, 3),
         "queue": input_jobs.status(),
         "capabilities": daemon_capabilities(),
+        "providers": provider_capabilities(),
+        "selected_target": get_selected_target(),
         "privilege": privilege_status(),
     }
 
@@ -580,14 +675,55 @@ def queue_status() -> dict[str, Any]:
     return input_jobs.status()
 
 
+@app.get("/providers")
+def providers() -> dict[str, Any]:
+    return provider_capabilities()
+
+
+@app.get("/targets")
+def targets(provider: str = "auto") -> dict[str, Any]:
+    provider_name, target_list, fallback_error = list_window_targets(provider)
+    return {
+        "ok": True,
+        "provider": provider_name,
+        "fallback_error": fallback_error,
+        "selected_target_id": get_selected_target_id(),
+        "targets": target_list,
+    }
+
+
+@app.post("/targets/select")
+def targets_select(request: TargetSelectRequest) -> dict[str, Any]:
+    target = select_target(request)
+    if request.activate and target and not target.get("is_stale"):
+        target["activated"] = activate_target(str(target["target_id"]))
+    return {"ok": bool(target), "selected": target}
+
+
+@app.get("/targets/current")
+def targets_current(target_id: str | None = None) -> dict[str, Any]:
+    target = get_target_by_id(target_id) if target_id else get_selected_target()
+    return {"ok": bool(target), "selected_target_id": get_selected_target_id(), "target": target}
+
+
+@app.post("/targets/refresh")
+def targets_refresh(request: TargetSelectRequest | None = None) -> dict[str, Any]:
+    target_id = request.target_id if request and request.target_id else get_selected_target_id()
+    target = get_target_by_id(target_id) if target_id else get_selected_target()
+    ok = bool(target) and not bool(target.get("is_stale")) if target else False
+    return {"ok": ok, "target": target}
+
+
 @app.get("/frame")
 def frame(
     monitor: Annotated[int, Query(ge=0)] = 1,
     roi: str | None = None,
     draw_roi: bool = False,
+    provider: str = "mss",
+    target_id: str | None = None,
 ) -> Response:
     parsed_roi = Roi.from_string(roi) if roi else None
-    image = daemon.capture(monitor, parsed_roi)
+    image = daemon.capture(monitor, parsed_roi, provider=provider, target_id=target_id)
     if draw_roi:
         image = image.copy()
         ImageDraw.Draw(image).rectangle((0, 0, image.width - 1, image.height - 1), outline=(255, 232, 0), width=3)
@@ -600,6 +736,8 @@ def stream(
     roi: str | None = None,
     fps: Annotated[float, Query(gt=0.1, le=30)] = 8,
     jpeg_quality: Annotated[int, Query(ge=20, le=95)] = 70,
+    provider: str = "mss",
+    target_id: str | None = None,
 ) -> StreamingResponse:
     parsed_roi = Roi.from_string(roi) if roi else None
     interval = 1.0 / fps
@@ -607,7 +745,7 @@ def stream(
     def generate():
         while True:
             started = time.perf_counter()
-            image = daemon.capture(monitor, parsed_roi)
+            image = daemon.capture(monitor, parsed_roi, provider=provider, target_id=target_id)
             payload = encode_image(image, "JPEG", quality=jpeg_quality)
             yield (
                 b"--frame\r\n"
@@ -631,6 +769,7 @@ def predict_once(request: PredictOnceRequest) -> dict[str, Any]:
 @app.post("/keys/press")
 def press_keys(request: PressKeysRequest) -> dict[str, Any]:
     keys = normalize_keys(request.keys)
+    normalize_input_provider(request.provider)
     return input_jobs.submit(
         "keys.press",
         lambda cancel_event: run_press_keys_job(request, keys, cancel_event),
@@ -666,6 +805,7 @@ def run_press_keys_job(
     events = press_key_sequence(
         keys,
         dry_run=request.dry_run,
+        provider=request.provider,
         timing=request.timing,
         cancel_event=cancel_event,
     )
@@ -673,7 +813,8 @@ def run_press_keys_job(
         "ok": not cancel_event.is_set(),
         "status": "cancelled" if cancel_event.is_set() else "completed",
         "dry_run": request.dry_run,
-        "input_adapter": "dry-run" if request.dry_run else KEYBOARD_ADAPTER.name,
+        "provider": request.provider,
+        "input_adapter": selected_input_adapter_name(request.dry_run, request.provider),
         "keys": keys,
         "events": events,
     }
@@ -715,6 +856,7 @@ def predict_and_press(request: PredictAndPressRequest) -> dict[str, Any]:
     ]
     keys = [key for key in keys if key in VALID_KEYS]
     if keys:
+        normalize_input_provider(request.input_provider)
         action = input_jobs.submit(
             "predict_and_press.keys",
             lambda cancel_event: run_predict_press_job(request, keys, cancel_event),
@@ -734,6 +876,7 @@ def run_predict_press_job(
     events = press_key_sequence(
         keys,
         dry_run=request.dry_run,
+        provider=request.input_provider,
         timing=request.timing,
         cancel_event=cancel_event,
     )
@@ -742,7 +885,8 @@ def run_predict_press_job(
         "status": "cancelled" if cancel_event.is_set() else "completed",
         "type": "press_sequence",
         "dry_run": request.dry_run,
-        "input_adapter": "dry-run" if request.dry_run else KEYBOARD_ADAPTER.name,
+        "provider": request.input_provider,
+        "input_adapter": selected_input_adapter_name(request.dry_run, request.input_provider),
         "min_confidence": request.min_confidence,
         "keys": keys,
         "events": events,
@@ -753,22 +897,33 @@ def run_predict_press_job(
 def frame_base64(
     monitor: Annotated[int, Query(ge=0)] = 1,
     roi: str | None = None,
+    provider: str = "mss",
+    target_id: str | None = None,
 ) -> dict[str, Any]:
     parsed_roi = Roi.from_string(roi) if roi else None
-    image = daemon.capture(monitor, parsed_roi)
+    image, metadata = daemon.capture_with_metadata(monitor, parsed_roi, provider=provider, target_id=target_id)
     png = encode_image(image, "PNG")
     return {
         "image_b64": base64.b64encode(png).decode("ascii"),
         "width": image.width,
         "height": image.height,
         "roi": [parsed_roi.left, parsed_roi.top, parsed_roi.right, parsed_roi.bottom] if parsed_roi else None,
-        "full_monitor": parsed_roi is None,
+        "full_monitor": metadata["full_monitor"],
+        "provider": metadata["provider"],
+        "monitor": metadata["monitor"],
+        "region": metadata["region"],
+        "target": metadata["target"],
     }
 
 
 def run_prediction(request: PredictOnceRequest) -> dict[str, Any]:
     roi = Roi.from_string(request.roi) if request.roi else None
-    image = daemon.capture(request.monitor, roi)
+    image, metadata = daemon.capture_with_metadata(
+        request.monitor,
+        roi,
+        provider=request.capture_provider,
+        target_id=request.target_id,
+    )
     payload = {
         "image_b64": base64.b64encode(encode_image(image, "PNG")).decode("ascii"),
         "sensors": request.sensors,
@@ -781,7 +936,10 @@ def run_prediction(request: PredictOnceRequest) -> dict[str, Any]:
     result["capture_daemon"] = {
         "monitor": request.monitor,
         "roi": [roi.left, roi.top, roi.right, roi.bottom] if roi else None,
-        "full_monitor": roi is None,
+        "full_monitor": metadata["full_monitor"],
+        "provider": metadata["provider"],
+        "target": metadata["target"],
+        "region": metadata["region"],
         "model_url": request.model_url,
         "roundtrip_ms": round((time.perf_counter() - started) * 1000, 2),
     }
@@ -802,19 +960,21 @@ def normalize_keys(keys: list[str] | str) -> list[str]:
 def press_key_sequence(
     keys: list[str],
     dry_run: bool,
+    provider: str,
     timing: HumanTiming,
     cancel_event: threading.Event | None = None,
 ) -> list[dict[str, Any]]:
-    return press_physical_keys([key.lower() for key in keys], dry_run, timing, cancel_event)
+    return press_physical_keys([key.lower() for key in keys], dry_run, provider, timing, cancel_event)
 
 
 def press_physical_keys(
     keys: list[str],
     dry_run: bool,
+    provider: str,
     timing: HumanTiming,
     cancel_event: threading.Event | None = None,
 ) -> list[dict[str, Any]]:
-    adapter: InputAdapter = DryRunInputAdapter() if dry_run else KEYBOARD_ADAPTER
+    adapter = get_input_adapter(provider, dry_run=dry_run)
     events = []
     initial_delay = random_delay(timing.initial_delay_ms)
     cancelable_sleep(initial_delay, cancel_event)
@@ -1002,6 +1162,358 @@ def set_ime_open_status(opened: bool) -> bool:
     user32.SendMessageW(ime_hwnd, WM_IME_CONTROL, IMC_SETOPENSTATUS, 1 if opened else 0)
     time.sleep(0.03)
     return bool(user32.SendMessageW(ime_hwnd, WM_IME_CONTROL, IMC_GETOPENSTATUS, 0)) == opened
+
+
+def provider_capabilities() -> dict[str, Any]:
+    return {
+        "window": {
+            "default": "pywinctl",
+            "providers": {
+                "pywinctl": module_capability(["pywinctl"]),
+                "builtin": {"available": True, "implemented": True, "module": None},
+            },
+        },
+        "input": {
+            "default": "builtin",
+            "providers": {
+                "builtin": {
+                    "available": True,
+                    "implemented": True,
+                    "supports_scan_codes": False,
+                    "adapter": KEYBOARD_ADAPTER.name,
+                },
+                "pydirectinput": {
+                    **module_capability(["pydirectinput", "pydirectinput_rgx"]),
+                    "supports_scan_codes": True,
+                    "adapter": "pydirectinput",
+                },
+            },
+        },
+        "capture": {
+            "default": "mss",
+            "providers": {
+                "mss": {"available": True, "implemented": True, "module": "mss"},
+                "dxcam": module_capability(["dxcam"]),
+                "windows_capture": {
+                    **module_capability(["windows_capture"]),
+                    "implemented": False,
+                    "note": "experimental provider candidate; not used as a default path",
+                },
+            },
+        },
+        "accessibility": {
+            "pywinauto": module_capability(["pywinauto"]),
+        },
+    }
+
+
+def module_capability(module_names: list[str]) -> dict[str, Any]:
+    for module_name in module_names:
+        spec = importlib.util.find_spec(module_name)
+        if spec is not None:
+            return {"available": True, "implemented": True, "module": module_name}
+    return {"available": False, "implemented": True, "module": module_names[0], "error": "not installed"}
+
+
+def normalize_input_provider(provider: str) -> str:
+    normalized = provider.lower().strip()
+    if normalized not in INPUT_PROVIDERS:
+        raise ValueError(f"unsupported input provider: {provider}")
+    return normalized
+
+
+def normalize_capture_provider(provider: str) -> str:
+    normalized = provider.lower().strip()
+    if normalized not in CAPTURE_PROVIDERS:
+        raise ValueError(f"unsupported capture provider: {provider}")
+    return normalized
+
+
+def normalize_window_provider(provider: str) -> str:
+    normalized = provider.lower().strip()
+    if normalized not in WINDOW_PROVIDERS:
+        raise ValueError(f"unsupported window provider: {provider}")
+    return normalized
+
+
+def load_pydirectinput() -> Any:
+    errors = []
+    for module_name in ("pydirectinput", "pydirectinput_rgx"):
+        try:
+            return importlib.import_module(module_name)
+        except Exception as exc:
+            errors.append(f"{module_name}: {exc}")
+    raise RuntimeError("pydirectinput provider is unavailable: " + "; ".join(errors))
+
+
+def get_input_adapter(provider: str, dry_run: bool) -> InputAdapter:
+    normalized = normalize_input_provider(provider)
+    if dry_run:
+        return DryRunInputAdapter()
+    if normalized == "builtin":
+        return KEYBOARD_ADAPTER
+    global PYDIRECTINPUT_ADAPTER
+    if PYDIRECTINPUT_ADAPTER is None:
+        PYDIRECTINPUT_ADAPTER = PyDirectInputAdapter()
+    return PYDIRECTINPUT_ADAPTER
+
+
+def selected_input_adapter_name(dry_run: bool, provider: str) -> str:
+    if dry_run:
+        normalize_input_provider(provider)
+        return "dry-run"
+    return get_input_adapter(provider, dry_run=False).name
+
+
+def normalize_pydirectinput_key(key: str) -> str:
+    normalized = key.lower() if len(key) == 1 and key.isalpha() else key.lower()
+    aliases = {
+        "ctrl": "ctrl",
+        "control": "ctrl",
+        "alt": "alt",
+        "shift": "shift",
+        "space": "space",
+        "enter": "enter",
+        "backspace": "backspace",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def capture_region_dxcam(monitor_index: int, region: dict[str, int]) -> Image.Image:
+    dxcam = importlib.import_module("dxcam")
+    output_idx = max(0, monitor_index - 1)
+    camera = dxcam.create(output_idx=output_idx, output_color="RGB")
+    box = (
+        int(region["left"]),
+        int(region["top"]),
+        int(region["left"] + region["width"]),
+        int(region["top"] + region["height"]),
+    )
+    frame = camera.grab(region=box)
+    if frame is None:
+        raise RuntimeError("dxcam returned no frame")
+    return Image.fromarray(frame)
+
+
+def capture_metadata(
+    provider: str,
+    monitor: int,
+    roi: Roi | None,
+    region: dict[str, int],
+    target: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return {
+        "provider": provider,
+        "monitor": monitor,
+        "roi": [roi.left, roi.top, roi.right, roi.bottom] if roi else None,
+        "full_monitor": roi is None and target is None,
+        "region": dict(region),
+        "target": target,
+    }
+
+
+def get_selected_target_id() -> str | None:
+    with selected_target_lock:
+        return selected_target_id
+
+
+def set_selected_target_id(target_id: str | None) -> None:
+    global selected_target_id
+    with selected_target_lock:
+        selected_target_id = target_id
+
+
+def list_window_targets(provider: str = "auto") -> tuple[str, list[dict[str, Any]], str | None]:
+    provider_name = normalize_window_provider(provider)
+    fallback_error: str | None = None
+    if provider_name in {"auto", "pywinctl"}:
+        try:
+            targets = list_pywinctl_targets()
+            return "pywinctl", targets, None
+        except Exception as exc:
+            fallback_error = str(exc)
+            if provider_name == "pywinctl":
+                return "pywinctl", [], fallback_error
+    return "builtin", list_builtin_targets(), fallback_error
+
+
+def select_target(request: TargetSelectRequest) -> dict[str, Any] | None:
+    if request.target_id:
+        target = get_target_by_id(request.target_id)
+        if target:
+            set_selected_target_id(str(target["target_id"]))
+        return target
+    if request.window_id is not None:
+        target = get_target_by_id(f"hwnd:{int(request.window_id)}")
+        if target:
+            set_selected_target_id(str(target["target_id"]))
+        return target
+    provider_name, targets, _ = list_window_targets(request.provider)
+    title_contains = request.title_contains.lower().strip() if request.title_contains else None
+    if title_contains:
+        targets = [target for target in targets if title_contains in str(target.get("title", "")).lower()]
+    target = targets[0] if targets else None
+    if target:
+        target["selected_via_provider"] = provider_name
+        set_selected_target_id(str(target["target_id"]))
+    return target
+
+
+def get_selected_target() -> dict[str, Any] | None:
+    target_id = get_selected_target_id()
+    if target_id:
+        return get_target_by_id(target_id)
+    hwnd = int(ctypes.WinDLL("user32", use_last_error=True).GetForegroundWindow())
+    return target_from_hwnd(hwnd, provider="builtin")
+
+
+def get_target_by_id(target_id: str | None) -> dict[str, Any] | None:
+    if not target_id:
+        return None
+    if target_id.startswith("hwnd:"):
+        try:
+            hwnd = int(target_id.split(":", 1)[1])
+        except ValueError:
+            return {"target_id": target_id, "is_stale": True, "error": "invalid hwnd target id"}
+        return target_from_hwnd(hwnd, provider="builtin")
+    return {"target_id": target_id, "is_stale": True, "error": "unsupported target id"}
+
+
+def activate_target(target_id: str) -> bool:
+    target = get_target_by_id(target_id)
+    if not target or target.get("is_stale"):
+        return False
+    hwnd = int(target["window_id"])
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.ShowWindow(wintypes.HWND(hwnd), SW_RESTORE)
+    return bool(user32.SetForegroundWindow(wintypes.HWND(hwnd)))
+
+
+def list_builtin_targets() -> list[dict[str, Any]]:
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    targets: list[dict[str, Any]] = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def callback(hwnd: wintypes.HWND, _lparam: wintypes.LPARAM) -> bool:
+        target = target_from_hwnd(int(hwnd), provider="builtin")
+        if target and not target.get("is_stale") and target.get("title"):
+            targets.append(target)
+        return True
+
+    user32.EnumWindows(callback, 0)
+    return targets
+
+
+def list_pywinctl_targets() -> list[dict[str, Any]]:
+    pywinctl = importlib.import_module("pywinctl")
+    active = pywinctl.getActiveWindow() if hasattr(pywinctl, "getActiveWindow") else None
+    active_hwnd = pywinctl_window_id(active) if active is not None else None
+    targets: list[dict[str, Any]] = []
+    for window in pywinctl.getAllWindows():
+        target = target_from_pywinctl(window, active_hwnd)
+        if target and target.get("title"):
+            targets.append(target)
+    return targets
+
+
+def target_from_pywinctl(window: Any, active_hwnd: int | None) -> dict[str, Any] | None:
+    hwnd = pywinctl_window_id(window)
+    if hwnd is not None:
+        target = target_from_hwnd(hwnd, provider="pywinctl")
+        if target:
+            target["is_active"] = hwnd == active_hwnd if active_hwnd is not None else target["is_active"]
+        return target
+    title = str(getattr(window, "title", "") or "")
+    bounds = pywinctl_bounds(window)
+    if not title or not bounds:
+        return None
+    target_id = f"pywinctl:{abs(hash((title, bounds['left'], bounds['top'], bounds['width'], bounds['height'])))}"
+    return {
+        "target_id": target_id,
+        "provider": "pywinctl",
+        "window_id": None,
+        "title": title,
+        "bounds": bounds,
+        "is_active": False,
+        "is_stale": False,
+    }
+
+
+def pywinctl_window_id(window: Any) -> int | None:
+    if window is None:
+        return None
+    for attr in ("hWnd", "_hWnd", "handle", "_handle"):
+        value = getattr(window, attr, None)
+        if value:
+            return int(value)
+    for method in ("getHandle", "getHWND"):
+        func = getattr(window, method, None)
+        if callable(func):
+            value = func()
+            if value:
+                return int(value)
+    return None
+
+
+def pywinctl_bounds(window: Any) -> dict[str, int] | None:
+    try:
+        left = int(getattr(window, "left"))
+        top = int(getattr(window, "top"))
+        width = int(getattr(window, "width"))
+        height = int(getattr(window, "height"))
+    except Exception:
+        box = getattr(window, "box", None)
+        if box is None:
+            return None
+        try:
+            left, top, width, height = [int(item) for item in box]
+        except Exception:
+            return None
+    return {"left": left, "top": top, "width": width, "height": height}
+
+
+def target_from_hwnd(hwnd: int, provider: str) -> dict[str, Any] | None:
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    if not hwnd or not bool(user32.IsWindow(wintypes.HWND(hwnd))):
+        return {"target_id": f"hwnd:{hwnd}", "provider": provider, "window_id": hwnd, "is_stale": True}
+    visible = bool(user32.IsWindowVisible(wintypes.HWND(hwnd)))
+    title = window_title(hwnd)
+    bounds = window_bounds(hwnd)
+    foreground = int(user32.GetForegroundWindow())
+    stale = not visible or bounds is None or bounds["width"] <= 0 or bounds["height"] <= 0
+    return {
+        "target_id": f"hwnd:{hwnd}",
+        "provider": provider,
+        "window_id": hwnd,
+        "title": title,
+        "bounds": bounds,
+        "is_active": hwnd == foreground,
+        "is_visible": visible,
+        "is_stale": stale,
+    }
+
+
+def window_title(hwnd: int) -> str:
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    length = int(user32.GetWindowTextLengthW(wintypes.HWND(hwnd)))
+    if length <= 0:
+        return ""
+    buffer = ctypes.create_unicode_buffer(length + 1)
+    user32.GetWindowTextW(wintypes.HWND(hwnd), buffer, length + 1)
+    return buffer.value
+
+
+def window_bounds(hwnd: int) -> dict[str, int] | None:
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    rect = wintypes.RECT()
+    if not user32.GetWindowRect(wintypes.HWND(hwnd), ctypes.byref(rect)):
+        return None
+    return {
+        "left": int(rect.left),
+        "top": int(rect.top),
+        "width": int(rect.right - rect.left),
+        "height": int(rect.bottom - rect.top),
+    }
 
 
 def daemon_capabilities() -> dict[str, str]:
