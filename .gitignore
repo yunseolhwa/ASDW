@@ -17,6 +17,7 @@ __pycache__/
 debug/
 logs/
 artifacts/
+.codex/runtime-logs/
 
 # Generated training data and model outputs
 data/
