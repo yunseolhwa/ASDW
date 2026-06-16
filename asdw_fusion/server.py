@@ -34,6 +34,7 @@ DEFAULT_DAEMON_URL = "http://127.0.0.1:7870"
 DEFAULT_LLM_BASE_URL = "http://127.0.0.1:8000/v1"
 DEFAULT_LLM_MODEL = "Qwen/Qwen2.5-3B-Instruct"
 ACTIONABLE_AGENT_ACTIONS = {"press_sequence", "type_text"}
+AGENT_CONTROLLERS = {"auto", "llm", "vision_rule"}
 FUSION_SENSORS = ("template", "classifier", "clip", "trocr", "owlvit")
 BASELINE_FUSION_SENSORS = ("template", "classifier")
 CANDIDATE_FUSION_SENSORS = ("clip", "trocr", "owlvit")
@@ -72,6 +73,13 @@ def env_float(name: str, default: float) -> float:
         return float(os.getenv(name, str(default)))
     except ValueError:
         return default
+
+
+def default_agent_controller() -> Literal["auto", "llm", "vision_rule"]:
+    raw = os.getenv("ASDW_AGENT_CONTROLLER", "auto").strip().lower()
+    if raw in AGENT_CONTROLLERS:
+        return raw  # type: ignore[return-value]
+    return "auto"
 
 
 class PredictRequest(BaseModel):
@@ -260,9 +268,14 @@ class AgentStepRequest(BaseModel):
     roi: str | None = Field(default=None)
     capture_provider: Literal["mss", "dxcam", "windows_capture"] = "mss"
     target_id: str | None = Field(default=None)
+    image_b64: str | None = Field(
+        default=None,
+        description="Optional PNG/JPEG base64 image for review smoke tests. When set, daemon capture is skipped.",
+    )
     sensors: list[str] = Field(default_factory=lambda: ["template", "classifier"])
     debug: bool = False
     mode: Literal["observe", "rehearse", "live"] = "observe"
+    controller: Literal["auto", "llm", "vision_rule"] = Field(default_factory=default_agent_controller)
     context: dict[str, Any] = Field(default_factory=dict)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     min_action_confidence: float = Field(
@@ -566,6 +579,7 @@ class AgentRuntimeState:
         with self._lock:
             return {
                 "mode": self.mode,
+                "controller": ((self.last_step or {}).get("controller") or {}).get("selected"),
                 "last_step": self.last_step,
                 "last_act": self.last_act,
             }
@@ -1012,13 +1026,7 @@ def run_agent_step(request: AgentStepRequest) -> dict[str, Any]:
     prediction: dict[str, Any] | None = None
 
     try:
-        frame = fetch_daemon_frame(
-            request.daemon_url,
-            request.monitor,
-            request.roi,
-            request.capture_provider,
-            request.target_id,
-        )
+        frame = fetch_agent_frame(request)
         prediction = predict(
             PredictRequest(
                 image_b64=str(frame["image_b64"]),
@@ -1042,24 +1050,28 @@ def run_agent_step(request: AgentStepRequest) -> dict[str, Any]:
         AGENT_RUNTIME.record_step(request.mode, result)
         return result
 
-    llm_result = call_llm_controller(request, frame, prediction)
-    llm_error: str | None = None
-    if llm_result.get("ok"):
-        decision = llm_result["decision"]
-    else:
-        llm_error = str(llm_result.get("error", "LLM controller failed"))
-        decision = blocked_decision(llm_error)
+    controller_result = run_agent_controller(request, frame, prediction)
+    decision = controller_result["decision"]
 
     decision, gate_reason = gate_agent_decision(decision, prediction, request.min_action_confidence)
-    blocked_reason = gate_reason or llm_error
+    blocked_reason = gate_reason or controller_result.get("error")
+    llm_result = controller_result.get("llm") or {}
     result = {
-        "ok": bool(llm_result.get("ok")) and gate_reason is None,
+        "ok": bool(controller_result.get("ok")) and gate_reason is None,
         "mode": request.mode,
         "timestamp": time.time(),
         "latency_ms": round((time.perf_counter() - started) * 1000, 2),
         "frame": frame_metadata(frame),
         "prediction": prediction_summary(prediction),
+        "controller": {
+            "requested": request.controller,
+            "selected": controller_result.get("selected"),
+            "ok": bool(controller_result.get("ok")),
+            "fallback_from": controller_result.get("fallback_from"),
+            "error": controller_result.get("error"),
+        },
         "llm": {
+            "attempted": bool(controller_result.get("llm_attempted")),
             "ok": bool(llm_result.get("ok")),
             "base_url": request.llm.base_url,
             "model": request.llm.model,
@@ -1124,6 +1136,125 @@ def run_agent_act(request: AgentActRequest) -> dict[str, Any]:
     }
     AGENT_RUNTIME.record_act(request.mode, result)
     return result
+
+
+def fetch_agent_frame(request: AgentStepRequest) -> dict[str, Any]:
+    if request.image_b64:
+        return inline_frame(request.image_b64)
+    return fetch_daemon_frame(
+        request.daemon_url,
+        request.monitor,
+        request.roi,
+        request.capture_provider,
+        request.target_id,
+    )
+
+
+def inline_frame(image_b64: str) -> dict[str, Any]:
+    image = decode_image(image_b64)
+    return {
+        "image_b64": image_b64,
+        "width": image.width,
+        "height": image.height,
+        "roi": None,
+        "full_monitor": None,
+        "provider": "inline_image",
+        "target": None,
+        "region": {"left": 0, "top": 0, "width": image.width, "height": image.height},
+    }
+
+
+def run_agent_controller(
+    request: AgentStepRequest,
+    frame: dict[str, Any],
+    prediction: dict[str, Any],
+) -> dict[str, Any]:
+    if request.controller in {"auto", "llm"}:
+        llm_result = call_llm_controller(request, frame, prediction)
+        if llm_result.get("ok"):
+            return {
+                "ok": True,
+                "selected": "llm",
+                "decision": llm_result["decision"],
+                "llm": llm_result,
+                "llm_attempted": True,
+            }
+        if request.controller == "llm":
+            error = str(llm_result.get("error", "LLM controller failed"))
+            return {
+                "ok": False,
+                "selected": "llm",
+                "decision": blocked_decision(error),
+                "error": error,
+                "llm": llm_result,
+                "llm_attempted": True,
+            }
+
+        decision = vision_rule_decision_from_prediction(prediction, request.min_action_confidence)
+        return {
+            "ok": True,
+            "selected": "vision_rule",
+            "fallback_from": "llm",
+            "decision": decision,
+            "llm": llm_result,
+            "llm_attempted": True,
+        }
+
+    decision = vision_rule_decision_from_prediction(prediction, request.min_action_confidence)
+    return {
+        "ok": True,
+        "selected": "vision_rule",
+        "decision": decision,
+        "llm_attempted": False,
+    }
+
+
+def vision_rule_decision_from_prediction(
+    prediction: dict[str, Any],
+    min_action_confidence: float,
+) -> AgentActionDecision:
+    accepted: list[tuple[str, float]] = []
+    for item in prediction.get("detections") or []:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key", "")).upper()
+        if key not in KEYS:
+            continue
+        try:
+            confidence = float(item.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        if confidence >= min_action_confidence:
+            accepted.append((key, max(0.0, min(1.0, confidence))))
+
+    if not accepted:
+        sequence_text = str(prediction.get("sequence_text") or "")
+        reason = "vision_rule found no ASDW detections above the action threshold"
+        if sequence_text:
+            reason = f"{reason}; raw sequence={sequence_text[:80]}"
+        return AgentActionDecision(
+            state="unknown",
+            action="retry_capture",
+            keys=[],
+            text=None,
+            confidence=0.0,
+            reason=reason,
+        )
+
+    keys = [key for key, _ in accepted]
+    confidence = min(score for _, score in accepted)
+    sensors = ",".join(str(sensor) for sensor in prediction.get("sensors") or [])
+    reason = f"vision_rule accepted {len(keys)} detections"
+    if sensors:
+        reason = f"{reason} from {sensors}"
+    return AgentActionDecision(
+        state="captcha_prompt",
+        action="press_sequence",
+        keys=keys,
+        text=None,
+        confidence=confidence,
+        reason=reason,
+    )
 
 
 def fetch_daemon_frame(
@@ -1240,7 +1371,7 @@ def gate_agent_decision(
         reason = f"Action {decision.action} is not allowed while state is {decision.state}."
         return blocked_decision(reason), reason
     if decision.action in ACTIONABLE_AGENT_ACTIONS and decision.confidence < min_confidence:
-        reason = f"LLM confidence {decision.confidence:.2f} is below required {min_confidence:.2f}."
+        reason = f"Action confidence {decision.confidence:.2f} is below required {min_confidence:.2f}."
         return blocked_decision(reason), reason
     if prediction is not None and decision.action == "press_sequence" and not prediction.get("detections"):
         reason = "Vision prediction returned no detections; press_sequence is blocked."

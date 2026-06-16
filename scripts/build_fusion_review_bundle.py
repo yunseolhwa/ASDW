@@ -32,6 +32,12 @@ REPORTS = [
         "md_path": Path("artifacts/agent-policy-smoke/latest/report.md"),
     },
     {
+        "id": "agent_step_inline",
+        "title": "Agent Step Inline Vision Rule Smoke",
+        "path": Path("artifacts/agent-step-inline-smoke/latest/report.json"),
+        "md_path": Path("artifacts/agent-step-inline-smoke/latest/report.md"),
+    },
+    {
         "id": "gpu_server",
         "title": "WSL ROCm GPU Server Smoke",
         "path": Path("artifacts/gpu-server-smoke/latest/report.json"),
@@ -166,6 +172,22 @@ def summarize_report(report_id: str, data: Any) -> dict[str, Any]:
             "total": len(cases),
             "cases": {case.get("name"): case.get("status") for case in cases},
             "queue_after": data.get("queue_after"),
+        }
+    if report_id == "agent_step_inline":
+        response = data.get("response") or {}
+        decision = response.get("decision") or {}
+        controller = response.get("controller") or {}
+        prediction = response.get("prediction") or {}
+        return {
+            "status": data.get("status"),
+            "controller": controller.get("selected"),
+            "action": decision.get("action"),
+            "keys": "".join(decision.get("keys") or []),
+            "expected_sequence": data.get("expected_sequence"),
+            "prediction_sequence": prediction.get("sequence_text"),
+            "frame_provider": ((response.get("frame") or {}).get("provider")),
+            "executable": response.get("executable"),
+            "latency_ms": response.get("latency_ms"),
         }
     if report_id == "gpu_server":
         prediction = data.get("prediction_summary") or {}
@@ -305,6 +327,7 @@ def review_gate(report: dict[str, Any]) -> dict[str, Any]:
     screenspot = ((rows.get("screenspot_pro") or {}).get("summary") or {})
     fusion = ((rows.get("fusion_snapshot") or {}).get("summary") or {})
     gpu = ((rows.get("gpu_server") or {}).get("summary") or {})
+    agent_step = ((rows.get("agent_step_inline") or {}).get("summary") or {})
 
     checks = [
         {
@@ -323,9 +346,18 @@ def review_gate(report: dict[str, Any]) -> dict[str, Any]:
             "evidence": json.dumps(fusion.get("dataset"), ensure_ascii=False),
         },
         {
-            "name": "non-Minecraft GUI evidence plumbing",
+            "name": "external GUI evidence plumbing",
             "status": "pass" if all((item.get("errors") == [] and item.get("accepted", 0) > 0) for item in [screenspot, ui, groundcua]) else "review",
             "evidence": f"ScreenSpot={screenspot.get('accepted')}, UI-Elements={ui.get('accepted')}, GroundCUA={groundcua.get('accepted')}",
+        },
+        {
+            "name": "inline /agent/step vision_rule",
+            "status": "pass"
+            if agent_step.get("status") == "pass"
+            and agent_step.get("controller") == "vision_rule"
+            and agent_step.get("action") == "press_sequence"
+            else "review",
+            "evidence": json.dumps(agent_step, ensure_ascii=False),
         },
         {
             "name": "live input remains gated",

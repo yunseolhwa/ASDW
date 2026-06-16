@@ -37,7 +37,7 @@ from asdw_fusion.server import find_button_boxes  # noqa: E402
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Create Maple-captcha-like ASDW 800x600 tiles.")
+    parser = argparse.ArgumentParser(description="Create ASDW prompt-like 800x600 tiles.")
     parser.add_argument("--count", type=int, default=120)
     parser.add_argument("--width", type=int, default=800)
     parser.add_argument("--height", type=int, default=600)

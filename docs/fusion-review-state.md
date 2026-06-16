@@ -10,7 +10,7 @@ Last updated: 2026-06-17 KST
 - `GET /fusion/status`: baseline/candidate 센서 목록, 역할, 현재 로드된 센서, 가중치, 모델 경로.
 - `POST /predict`: 이미지 base64 + sensor list를 받아 detections, sensor votes, fused scores, fusion review summary 반환. optional `boxes`를 넣으면 외부 box proposal을 사용합니다.
 - `POST /grounding/review`: 외부 GUI element bbox/text/label을 받아 정규화 좌표, crop 요약, instruction overlap, rejected box를 반환합니다.
-- `POST /agent/step`: capture + vision + LLM 판단까지 수행하며 입력하지 않음.
+- `POST /agent/step`: capture 또는 inline image + vision + `auto|llm|vision_rule` controller 판단까지 수행하며 입력하지 않음.
 - `POST /agent/act`: 모드 정책을 통과한 action만 daemon에 전달.
 
 현재 검토 가능한 artifact:
@@ -29,6 +29,8 @@ Last updated: 2026-06-17 KST
 - `artifacts/fusion-contract/latest/report.json`
 - `artifacts/agent-policy-smoke/latest/report.md`
 - `artifacts/agent-policy-smoke/latest/report.json`
+- `artifacts/agent-step-inline-smoke/latest/report.md`
+- `artifacts/agent-step-inline-smoke/latest/report.json`
 - `artifacts/gpu-server-smoke/latest/report.md`
 - `artifacts/gpu-server-smoke/latest/report.json`
 - `artifacts/gui-dataset-readiness/latest/report.md`
@@ -57,11 +59,12 @@ Review bundle:
 
 | Gate | Status | Evidence |
 | --- | --- | --- |
-| contract safety gates | `pass` | `19/19` |
+| contract safety gates | `pass` | `21/21` |
 | agent observe/rehearse policy | `pass` | `4/4`, direct `/agent/act` decisions, no LLM, no live input |
+| inline /agent/step vision_rule | `pass` | inline image -> vision -> `press_sequence`, sequence `SDWWDWDAA`, warm latency about `150 ms` |
 | baseline ASDW fusion sample | `pass` | `template,classifier` expected sequence match |
 | external-box synthetic dataset | `pass` | label boxes, `19/20` sequence accuracy |
-| non-Minecraft GUI evidence plumbing | `pass` | ScreenSpot-Pro `2`, UI-Elements `14`, GroundCUA `29` accepted boxes |
+| external GUI evidence plumbing | `pass` | ScreenSpot-Pro `2`, UI-Elements `14`, GroundCUA `29` accepted boxes |
 | live input | `not_run` | intentionally not executed |
 | WSL ROCm GPU server smoke | `pass` | temporary server, `prediction.device == cuda`, sequence `SDWWDWDAA` |
 | SGLang runtime | `offline` | local `/v1/models` connection timeout |
@@ -72,7 +75,7 @@ Readiness audit:
 .\.venv-win\Scripts\python.exe .\scripts\audit_fusion_readiness.py
 ```
 
-최근 결과: `reviewable`, `29/29` checks passed. 이 audit는 구현이 "사람 검토 가능한 상태"인지 확인합니다. live 입력, SGLang runtime, optional provider, 장시간 soak를 완료 조건으로 둔 것이 아니라, 해당 항목들이 명시적으로 미검증으로 분리되어 있는지까지 확인합니다.
+최근 결과: `reviewable`, `31/31` checks passed. 이 audit는 구현이 "사람 검토 가능한 상태"인지 확인합니다. live 입력, SGLang runtime, optional provider, 장시간 soak를 완료 조건으로 둔 것이 아니라, 해당 항목들이 명시적으로 미검증으로 분리되어 있는지까지 확인합니다.
 
 검증 이미지: `artifacts/visual-checks/detection-bboxes-clean.png`
 
@@ -120,7 +123,7 @@ Dataset 비교 report:
 wsl -d Ubuntu-24.04-ROCmLab -- bash -lc "cd /mnt/d/asdw-fusion-typer && .venv-wsl/bin/python scripts/verify_fusion_contracts.py"
 ```
 
-최근 결과: `19/19` pass. 검증 범위는 LLM action schema, invalid key/action rejection, low-confidence blocking, blocked/error state blocking, empty prediction blocking, observe/live mode policy, external `boxes` normalization, generic grounding evidence schema, classifier-weighted fusion, baseline/candidate sensor separation입니다. 이 검증은 daemon endpoint, model loading, SGLang을 호출하지 않습니다.
+최근 결과: `21/21` pass. 검증 범위는 LLM action schema, invalid key/action rejection, low-confidence blocking, blocked/error state blocking, empty prediction blocking, `vision_rule` controller decision, observe/live mode policy, external `boxes` normalization, generic grounding evidence schema, classifier-weighted fusion, baseline/candidate sensor separation입니다. 이 검증은 daemon endpoint, model loading, SGLang을 호출하지 않습니다.
 
 Agent policy HTTP smoke:
 
@@ -224,10 +227,10 @@ wsl -d Ubuntu-24.04-ROCmLab -- bash -lc "cd /mnt/d/asdw-fusion-typer && .venv-ws
 - SGLang runtime version and live `/llm/check`
 - long-running daemon soak test
 - long-running GPU server soak test and warm-latency distribution
-- non-Minecraft GUI grounding accuracy on ScreenSpot/RICO/GroundCUA; ScreenSpot-Pro, UI-Elements, GroundCUA tiny external-box/review flow만 확인됨
+- external GUI grounding accuracy on ScreenSpot/RICO/GroundCUA; ScreenSpot-Pro, UI-Elements, GroundCUA tiny external-box/review flow만 확인됨
 
 ## PM Readout
 
 현재 퓨전 모듈은 "작은 센서 조합" 방향으로 작동합니다. `template`은 빠른 기준 센서이고, `classifier`는 현재 정확도를 책임지는 센서입니다. `template,classifier` 조합은 warm 상태에서 1초 미만으로 정답을 반환했습니다.
 
-다음 검토 포인트는 일반화입니다. Minecraft 실험 환경을 벗어나려면 ScreenSpot/RICO/GroundCUA 같은 GUI 데이터셋으로 element localization 또는 prompt reading을 검증해야 합니다. 다만 이 단계는 baseline 입력 경계를 무겁게 하지 않는 별도 검증으로 다뤄야 합니다.
+다음 검토 포인트는 일반화입니다. 초기 실험 화면을 벗어나려면 ScreenSpot/RICO/GroundCUA 같은 GUI 데이터셋으로 element localization 또는 prompt reading을 검증해야 합니다. 다만 이 단계는 baseline 입력 경계를 무겁게 하지 않는 별도 검증으로 다뤄야 합니다.

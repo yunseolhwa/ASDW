@@ -31,6 +31,7 @@ try:
         fusion_review_summary,
         gate_agent_decision,
         normalize_request_boxes,
+        vision_rule_decision_from_prediction,
     )
 except ModuleNotFoundError as exc:
     missing = exc.name or "unknown"
@@ -195,6 +196,47 @@ def test_empty_prediction_blocks_press_sequence() -> dict[str, Any]:
     assert gated.action == "none"
     assert reason and "no detections" in reason
     return {"blocked_reason": reason}
+
+
+def test_vision_rule_builds_press_sequence() -> dict[str, Any]:
+    decision = vision_rule_decision_from_prediction(
+        {
+            "sequence_text": "ASDW",
+            "sensors": ["template", "classifier"],
+            "detections": [
+                {"key": "a", "confidence": 0.91},
+                {"key": "S", "confidence": 0.88},
+                {"key": "D", "confidence": 0.94},
+                {"key": "W", "confidence": 0.90},
+            ],
+        },
+        0.60,
+    )
+    assert decision.state == "captcha_prompt"
+    assert decision.action == "press_sequence"
+    assert decision.keys == ["A", "S", "D", "W"]
+    assert decision.confidence == 0.88
+    assert "vision_rule" in decision.reason
+    return decision.model_dump()
+
+
+def test_vision_rule_retries_uncertain_prediction() -> dict[str, Any]:
+    decision = vision_rule_decision_from_prediction(
+        {
+            "sequence_text": "AS",
+            "sensors": ["template", "classifier"],
+            "detections": [
+                {"key": "A", "confidence": 0.41},
+                {"key": "S", "confidence": 0.39},
+            ],
+        },
+        0.60,
+    )
+    assert decision.state == "unknown"
+    assert decision.action == "retry_capture"
+    assert decision.keys == []
+    assert decision.confidence == 0.0
+    return decision.model_dump()
 
 
 def test_observe_never_sends_input() -> dict[str, Any]:
@@ -435,6 +477,8 @@ def main() -> int:
         ("low_confidence_blocks_action", test_low_confidence_blocks_action),
         ("blocked_state_blocks_action", test_blocked_state_blocks_action),
         ("empty_prediction_blocks_press_sequence", test_empty_prediction_blocks_press_sequence),
+        ("vision_rule_builds_press_sequence", test_vision_rule_builds_press_sequence),
+        ("vision_rule_retries_uncertain_prediction", test_vision_rule_retries_uncertain_prediction),
         ("observe_never_sends_input", test_observe_never_sends_input),
         ("live_requires_explicit_allow", test_live_requires_explicit_allow),
         ("predict_request_flat_boxes", test_predict_request_flat_boxes),

@@ -145,14 +145,15 @@ windows-capture
 | WSL server import/compile | Verified | `.venv-wsl` import and `py_compile` passed |
 | WSL ROCm visibility | Verified with warning | `torch.cuda.is_available() == True`, device `AMD Radeon RX 6600 XT`; driver-old warning observed |
 | WSL ROCm GPU server smoke | Verified one-shot | temporary WSL server on port `7869` ran `POST /predict` with `template,classifier`; `prediction.device == cuda`, post-predict status `device == cuda`, sequence `SDWWDWDAA`; first load latency about `44.2s` |
-| Fusion server health | Verified | `GET /health` returned `ok=true`, `cv2=true`; current background review server reports `device=cpu` |
+| Fusion server health | Verified | `GET /health` returned `ok=true`, `cv2=true`; current background review server reports `device=cuda` after classifier load |
 | Fusion status endpoint | Verified | `GET /fusion/status` exposes baseline/candidate sensors, evidence endpoints, roles, weights, loaded models, model paths, and runtime device |
 | Fusion review summary | Verified | `POST /predict` includes `fusion.sensor_sequences`, `agreement_rate`, `disagreements`, per-detection `sensor_keys`, and `fused_scores` |
 | Fusion review report harness | Verified | `scripts/review_fusion_server.py --include-candidates` wrote `artifacts/fusion-review/latest/report.md` and `report.json`; it only calls `/fusion/status` and `/predict` |
 | Fusion review bundle | Verified | Windows `.venv-win` ran `scripts/build_fusion_review_bundle.py`; it wrote `artifacts/fusion-review-bundle/latest/report.md` and safe-probed status endpoints without calling input endpoints |
-| Fusion readiness audit | Verified | Windows `.venv-win` ran `scripts/audit_fusion_readiness.py`; `29/29` checks passed and wrote `artifacts/fusion-readiness-audit/latest/report.md` |
-| Fusion contract verifier | Verified | WSL `.venv-wsl` ran `scripts/verify_fusion_contracts.py`; `19/19` contracts passed and wrote `artifacts/fusion-contract/latest/report.md` |
+| Fusion readiness audit | Verified | WSL `.venv-wsl` ran `scripts/audit_fusion_readiness.py`; `31/31` checks passed and wrote `artifacts/fusion-readiness-audit/latest/report.md` |
+| Fusion contract verifier | Verified | WSL `.venv-wsl` ran `scripts/verify_fusion_contracts.py`; `21/21` contracts passed and wrote `artifacts/fusion-contract/latest/report.md` |
 | Agent policy HTTP smoke | Verified | Windows `.venv-win` ran `scripts/smoke_agent_policy.py`; `4/4` cases passed for observe skip, rehearse dry-run, live guard, and low-confidence block without capture, LLM call, or live input |
+| Agent step inline smoke | Verified | WSL `.venv-wsl` ran `scripts/smoke_agent_step_inline.py`; inline image -> `/predict` -> `vision_rule` -> `press_sequence` action JSON returned sequence `SDWWDWDAA` with warm latency about `150 ms`; no daemon capture, LLM call, or live input |
 | Generic grounding review endpoint | Verified | `POST /grounding/review` accepted external GUI bbox evidence and returned normalized box, crop summary, area ratio, and instruction overlap without model loading or input |
 | GUI dataset metadata readiness | Verified metadata only | WSL `.venv-wsl` ran `scripts/gui_dataset_readiness.py`; Hugging Face metadata was inspected for ScreenSpot, ScreenSpot-Pro, GroundCUA, RICO-ScreenQA, and UI-Elements without large downloads |
 | ScreenSpot-Pro tiny external-box flow | Verified flow, not accuracy | WSL `.venv-wsl` ran `scripts/review_screenspot_pro_tiny.py --max-samples 2`; two high-resolution GUI samples used `/grounding/review` and external `boxes` in `/predict`, then wrote overlays/report without input endpoints |
@@ -182,7 +183,7 @@ windows-capture
 | Game/app-specific compatibility | Not verified | needs per-target scenario test |
 | SGLang server runtime version | Not verified in repo venv | only OpenAI-compatible endpoint contract is assumed |
 | Candidate sensor generalization | Not verified | CLIP/TrOCR/OWL-ViT were only smoke-tested on the review sample and are not promoted to baseline |
-| Non-Minecraft GUI grounding accuracy | Not verified | ScreenSpot-Pro, UI-Elements, and GroundCUA tiny flows exist, but they validate evidence plumbing, not real provider accuracy or task success |
+| External GUI grounding accuracy | Not verified | ScreenSpot-Pro, UI-Elements, and GroundCUA tiny flows exist, but they validate evidence plumbing, not real provider accuracy or task success |
 
 Known caveat:
 
@@ -197,7 +198,7 @@ Windows:
 .\.venv-win\Scripts\python.exe --version
 .\.venv-win\Scripts\python.exe -m pip --version
 .\.venv-win\Scripts\python.exe -m pip freeze --all
-.\.venv-win\Scripts\python.exe -m py_compile .\asdw_fusion\windows_capture_daemon.py .\asdw_fusion\server.py .\asdw_fusion\client_windows.py .\scripts\review_fusion_server.py .\scripts\verify_fusion_contracts.py .\scripts\gui_dataset_readiness.py .\scripts\review_screenspot_pro_tiny.py .\scripts\review_ui_elements_tiny.py .\scripts\review_groundcua_tiny.py .\scripts\build_fusion_review_bundle.py .\scripts\audit_fusion_readiness.py .\scripts\smoke_agent_policy.py .\scripts\smoke_server_wsl_gpu.py
+.\.venv-win\Scripts\python.exe -m py_compile .\asdw_fusion\windows_capture_daemon.py .\asdw_fusion\server.py .\asdw_fusion\client_windows.py .\scripts\review_fusion_server.py .\scripts\verify_fusion_contracts.py .\scripts\gui_dataset_readiness.py .\scripts\review_screenspot_pro_tiny.py .\scripts\review_ui_elements_tiny.py .\scripts\review_groundcua_tiny.py .\scripts\build_fusion_review_bundle.py .\scripts\audit_fusion_readiness.py .\scripts\smoke_agent_policy.py .\scripts\smoke_agent_step_inline.py .\scripts\smoke_server_wsl_gpu.py .\scripts\build_fusion_showcase.py
 ```
 
 WSL:
@@ -205,7 +206,7 @@ WSL:
 ```powershell
 wsl -d Ubuntu-24.04-ROCmLab -- bash -lc "cd /mnt/d/asdw-fusion-typer && .venv-wsl/bin/python --version"
 wsl -d Ubuntu-24.04-ROCmLab -- bash -lc "cd /mnt/d/asdw-fusion-typer && .venv-wsl/bin/python -m pip freeze --all"
-wsl -d Ubuntu-24.04-ROCmLab -- bash -lc "cd /mnt/d/asdw-fusion-typer && .venv-wsl/bin/python -m py_compile asdw_fusion/server.py asdw_fusion/client_windows.py scripts/review_fusion_server.py scripts/verify_fusion_contracts.py scripts/gui_dataset_readiness.py scripts/review_screenspot_pro_tiny.py scripts/review_ui_elements_tiny.py scripts/review_groundcua_tiny.py scripts/build_fusion_review_bundle.py scripts/audit_fusion_readiness.py scripts/smoke_agent_policy.py scripts/smoke_server_wsl_gpu.py"
+wsl -d Ubuntu-24.04-ROCmLab -- bash -lc "cd /mnt/d/asdw-fusion-typer && .venv-wsl/bin/python -m py_compile asdw_fusion/server.py asdw_fusion/client_windows.py scripts/review_fusion_server.py scripts/verify_fusion_contracts.py scripts/gui_dataset_readiness.py scripts/review_screenspot_pro_tiny.py scripts/review_ui_elements_tiny.py scripts/review_groundcua_tiny.py scripts/build_fusion_review_bundle.py scripts/audit_fusion_readiness.py scripts/smoke_agent_policy.py scripts/smoke_agent_step_inline.py scripts/smoke_server_wsl_gpu.py scripts/build_fusion_showcase.py"
 ```
 
 ROCm:

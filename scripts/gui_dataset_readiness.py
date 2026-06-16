@@ -212,7 +212,7 @@ def markdown_report(report: dict[str, Any]) -> str:
             "",
             "PM Interpretation:",
             "",
-            "- ScreenSpot-Pro and GroundCUA are the strongest non-Minecraft GUI grounding candidates.",
+            "- ScreenSpot-Pro and GroundCUA are the strongest external GUI grounding candidates.",
             "- RICO/ScreenSpot parquet-packaged candidates stay outside the baseline until a parquet reader is intentionally approved.",
             "- This does not promote any dataset or parser to runtime baseline; it only creates a review queue for generalization evidence.",
             "",

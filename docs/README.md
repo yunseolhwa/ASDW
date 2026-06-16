@@ -34,7 +34,7 @@ WSL ROCm GPU server smoke:
 
 - `artifacts/gpu-server-smoke/latest/report.md`
 
-Non-Minecraft GUI dataset metadata readiness report:
+External GUI dataset metadata readiness report:
 
 - `artifacts/gui-dataset-readiness/latest/report.md`
 

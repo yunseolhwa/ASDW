@@ -221,7 +221,7 @@ def markdown_report(report: dict[str, Any]) -> str:
         f"- Dataset: [`{REPO_ID}`](https://huggingface.co/datasets/{REPO_ID})",
         f"- Server: `{report['server']}`",
         f"- Sensors: `{','.join(report['sensors'])}`",
-        "- Scope: tiny sample only; verifies `/grounding/review` and external `boxes` flow on non-Minecraft GUI screenshots.",
+        "- Scope: tiny sample only; verifies `/grounding/review` and external `boxes` flow on GUI screenshots.",
         "- It does not call any input endpoint.",
         "",
         "| UI ID | App | Platform | Instruction | Box | Grounding | Prediction | Confidence | Overlay |",

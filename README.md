@@ -2,7 +2,7 @@
 
 화면에 나타나는 `A`, `S`, `D`, `W` 계열 프롬프트를 여러 센서로 읽고, 검증된 action만 Windows 입력 경계로 넘기는 로컬 퓨전 입력 프로젝트입니다.
 
-Minecraft는 실험 환경 중 하나입니다. 이 프로젝트의 중심은 특정 게임 전용 센서가 아니라, 화면 캡처, 비전 센서, 로컬 LLM 판단, 입력 안전 정책을 얇게 결합하는 퓨전 모듈입니다.
+초기 실험 화면은 대상 환경 중 하나일 뿐입니다. 이 프로젝트의 중심은 특정 게임 전용 센서가 아니라, 화면 캡처, 비전 센서, 로컬 LLM 판단, 입력 안전 정책을 얇게 결합하는 퓨전 모듈입니다.
 
 구조는 두 프로세스와 한 개의 agent 컨트롤 계층입니다.
 
@@ -70,7 +70,7 @@ GET http://127.0.0.1:7868/fusion/status
 - `POST /predict`: 이미지 1장을 받아 센서별 vote와 융합 결과를 반환합니다.
 - `POST /grounding/review`: 외부 GUI element bbox/text/label을 받아 일반 grounding evidence를 반환합니다.
 - `GET /fusion/status`: 사용 가능한 센서, 현재 로드된 센서, 가중치, 모델 경로를 반환합니다.
-- `POST /agent/step`: 캡처, 비전 추론, LLM action 판단까지만 수행하고 입력하지 않습니다.
+- `POST /agent/step`: 캡처 또는 inline image, 비전 추론, `auto|llm|vision_rule` controller 판단까지만 수행하고 입력하지 않습니다.
 - `POST /agent/act`: 모드 정책을 통과한 action만 Windows daemon으로 넘깁니다.
 
 전체 검토 진입점은 review bundle입니다. 기존 report를 모으고 현재 server/daemon/LLM 상태를 safe probe로 기록합니다. 입력 endpoint는 호출하지 않습니다.
@@ -153,6 +153,21 @@ artifacts/agent-policy-smoke/latest/report.md
 artifacts/agent-policy-smoke/latest/report.json
 ```
 
+SGLang 없이도 비전 결과가 안전 action JSON까지 이어지는지 확인하려면:
+
+```powershell
+wsl -d Ubuntu-24.04-ROCmLab -- bash -lc "cd /mnt/d/asdw-fusion-typer && .venv-wsl/bin/python scripts/smoke_agent_step_inline.py"
+```
+
+출력:
+
+```text
+artifacts/agent-step-inline-smoke/latest/report.md
+artifacts/agent-step-inline-smoke/latest/report.json
+```
+
+이 smoke는 inline image로 `/agent/step`을 호출하고, `vision_rule` controller가 `press_sequence` action JSON을 만드는지 확인합니다. daemon capture, LLM call, live input은 수행하지 않습니다.
+
 WSL ROCm 임시 서버를 별도 포트로 띄워 GPU 기반 `/predict` 1회를 확인하려면:
 
 ```powershell
@@ -190,7 +205,7 @@ Dataset 검증 요약:
 
 PM 판단: 다음 병목은 ASDW classifier가 아니라 범용 box proposal입니다. 그래서 OmniParser류 GUI parser는 baseline 의존성이 아니라, 필요할 때 붙일 수 있는 external `boxes` provider 후보로 보는 게 맞습니다.
 
-Non-Minecraft GUI 데이터셋은 metadata readiness부터 확인합니다. 이 명령은 Hugging Face repo metadata만 읽고 대용량 파일은 다운로드하지 않습니다.
+외부 GUI 데이터셋은 metadata readiness부터 확인합니다. 이 명령은 Hugging Face repo metadata만 읽고 대용량 파일은 다운로드하지 않습니다.
 
 ```powershell
 wsl -d Ubuntu-24.04-ROCmLab -- bash -lc "cd /mnt/d/asdw-fusion-typer && .venv-wsl/bin/python scripts/gui_dataset_readiness.py"
@@ -495,7 +510,7 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:7868/heartbeat/stop"
 
 ## LLM agent 컨트롤러
 
-WSL 서버는 SGLang OpenAI-compatible endpoint를 우선 사용해 action JSON을 생성합니다. 기본값:
+WSL 서버는 SGLang OpenAI-compatible endpoint를 우선 사용해 action JSON을 생성합니다. `/agent/step`의 기본 controller는 `auto`이며, LLM이 실패하면 검증된 비전 결과를 `vision_rule`로 안전 action JSON에 변환할 수 있습니다. 기본값:
 
 ```text
 ASDW_LLM_BASE_URL=http://127.0.0.1:8000/v1
@@ -526,9 +541,9 @@ GET  http://127.0.0.1:7868/agent/status
 GET  http://127.0.0.1:7868/daemon/status
 ```
 
-`/llm/check`는 SGLang이 켜져 있는지 보는 안전 확인용입니다. 현재 SGLang이 꺼져 있으면 `ok=false`와 오류를 반환하고, 이 상태에서는 `/agent/act`가 실제 입력을 진행할 근거가 없습니다.
+`/llm/check`는 SGLang이 켜져 있는지 보는 안전 확인용입니다. 현재 SGLang이 꺼져 있으면 `ok=false`와 오류를 반환합니다. `/agent/step`의 `auto` controller는 이때 `vision_rule` fallback을 사용할 수 있지만, 실제 입력 여부는 여전히 `/agent/act`의 mode policy와 `allow_live_input`이 결정합니다.
 
-`/agent/step`은 캡처, 비전 추론, LLM 판단까지만 수행하고 입력하지 않습니다.
+`/agent/step`은 캡처, 비전 추론, controller 판단까지만 수행하고 입력하지 않습니다.
 
 ```powershell
 $body = @{
@@ -536,6 +551,7 @@ $body = @{
   monitor = 1
   capture_provider = "mss"
   sensors = @("template", "classifier")
+  controller = "auto"
   mode = "observe"
 } | ConvertTo-Json -Depth 4
 

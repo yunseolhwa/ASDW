@@ -103,7 +103,7 @@ LLM은 비전 분류기가 아니라 action 컨트롤러입니다. 현재 구현
 .\.venv-win\Scripts\python.exe .\scripts\audit_fusion_readiness.py
 ```
 
-최근 결과는 `reviewable`, `29/29` pass이며 `artifacts/fusion-readiness-audit/latest/report.md`에 저장됩니다. 이 audit는 현재 퓨전 모듈이 사람 검토 가능한 상태인지 확인합니다. live 입력, SGLang runtime, optional provider, 장시간 soak는 완료 처리하지 않고 명시 미검증으로 유지합니다.
+최근 결과는 `reviewable`, `31/31` pass이며 `artifacts/fusion-readiness-audit/latest/report.md`에 저장됩니다. 이 audit는 현재 퓨전 모듈이 사람 검토 가능한 상태인지 확인합니다. live 입력, SGLang runtime, optional provider, 장시간 soak는 완료 처리하지 않고 명시 미검증으로 유지합니다.
 
 서버 없이 schema와 safety gate만 검증:
 
@@ -111,7 +111,7 @@ LLM은 비전 분류기가 아니라 action 컨트롤러입니다. 현재 구현
 wsl -d Ubuntu-24.04-ROCmLab -- bash -lc "cd /mnt/d/asdw-fusion-typer && .venv-wsl/bin/python scripts/verify_fusion_contracts.py"
 ```
 
-최근 결과는 `19/19` pass이며 `artifacts/fusion-contract/latest/report.md`에 저장됩니다. 이 검증은 daemon endpoint, 모델 로딩, SGLang 호출 없이 LLM action schema, mode policy, confidence gate, external box normalization, generic grounding evidence schema, fusion weighting을 확인합니다.
+최근 결과는 `21/21` pass이며 `artifacts/fusion-contract/latest/report.md`에 저장됩니다. 이 검증은 daemon endpoint, 모델 로딩, SGLang 호출 없이 LLM action schema, `vision_rule` controller, mode policy, confidence gate, external box normalization, generic grounding evidence schema, fusion weighting을 확인합니다.
 
 Agent policy HTTP smoke:
 
@@ -120,6 +120,14 @@ Agent policy HTTP smoke:
 ```
 
 최근 결과는 `4/4` pass이며 `artifacts/agent-policy-smoke/latest/report.md`에 저장됩니다. direct `/agent/act` decision으로 `observe` skip, `rehearse` daemon `dry_run=true`, `live` guard, low-confidence block을 확인합니다. 이 검증은 capture, LLM call, live input을 수행하지 않습니다.
+
+Agent step inline smoke:
+
+```powershell
+wsl -d Ubuntu-24.04-ROCmLab -- bash -lc "cd /mnt/d/asdw-fusion-typer && .venv-wsl/bin/python scripts/smoke_agent_step_inline.py"
+```
+
+최근 결과는 `pass`이며 `artifacts/agent-step-inline-smoke/latest/report.md`에 저장됩니다. inline image 기준 `vision_rule` controller가 sequence `SDWWDWDAA`를 `press_sequence` action JSON으로 만들었고, warm latency는 약 `150 ms`입니다. 이 검증은 daemon capture, LLM call, live input을 수행하지 않습니다.
 
 WSL ROCm GPU server smoke:
 
@@ -142,7 +150,7 @@ Detector와 classifier/fusion을 분리해서 보려면:
 - external label box route: `19/20` sequence accuracy
 - PM 판단: 다음 병목은 classifier가 아니라 범용 box proposal provider
 
-Non-Minecraft GUI dataset readiness:
+External GUI dataset readiness:
 
 ```powershell
 wsl -d Ubuntu-24.04-ROCmLab -- bash -lc "cd /mnt/d/asdw-fusion-typer && .venv-wsl/bin/python scripts/gui_dataset_readiness.py"
@@ -199,9 +207,10 @@ wsl -d Ubuntu-24.04-ROCmLab -- bash -lc "cd /mnt/d/asdw-fusion-typer && .venv-ws
   - base URL, 모델명, RTT, 오류 반환
   - 현재 검증: SGLang offline일 때 `ok=false`로 안전 실패 반환; SGLang 실제 런타임/모델 로딩은 미검증
 - `POST /agent/step`
-  - Windows 데몬 캡처
+  - Windows 데몬 캡처 또는 검증용 inline image 사용
   - 비전 추론
-  - LLM action JSON 생성
+  - `controller=auto|llm|vision_rule`
+  - `auto`는 LLM 우선, 실패 시 `vision_rule` fallback
   - Pydantic schema 재검증
   - 실제 입력 없음
 - `POST /agent/act`

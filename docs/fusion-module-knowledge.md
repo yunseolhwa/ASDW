@@ -6,7 +6,7 @@ Last updated: 2026-06-17 KST
 
 ASDW Fusion Typer의 퓨전 모듈은 특정 게임 전용 센서가 아닙니다. 목적은 화면에 나타난 입력 프롬프트나 UI 단서를 여러 작은 센서로 읽고, LLM action controller가 안전하게 실행할 수 있는 구조화된 evidence를 만드는 것입니다.
 
-Minecraft는 현재 실험 환경 중 하나입니다. 대상별 차이는 ROI, sensor 조합, prompt/context, mode policy에서 처리하고, 퓨전 모듈 자체를 Minecraft 전용으로 만들지 않습니다.
+초기 실험 화면은 현재 대상 환경 중 하나입니다. 대상별 차이는 ROI, sensor 조합, prompt/context, mode policy에서 처리하고, 퓨전 모듈 자체를 특정 앱/게임 전용으로 만들지 않습니다.
 
 ## Current Fusion Shape
 
@@ -22,6 +22,8 @@ Minecraft는 현재 실험 환경 중 하나입니다. 대상별 차이는 ROI, 
 `POST /predict`는 optional `boxes`도 받습니다. 이 값이 있으면 built-in detector를 건너뛰고 외부 box proposal을 분류/융합합니다. 이렇게 detector와 classifier/fusion을 분리하면 특정 실험 화면의 box detector에 매몰되지 않고, OmniParser류 GUI parser, accessibility tree, target-specific ROI detector를 얇게 연결할 수 있습니다.
 
 `POST /grounding/review`는 ASDW classifier와 분리된 일반 GUI evidence 경계입니다. 외부 provider가 준 bbox/text/label을 받아 좌표 정규화, crop 요약, instruction overlap, rejected box를 반환합니다. 이 endpoint는 LLM action controller가 읽을 수 있는 구조화 evidence를 만들지만, 입력 실행과 모델 추론은 하지 않습니다.
+
+`POST /agent/step`은 입력하지 않는 판단 endpoint입니다. 기본 controller는 `auto`이며, SGLang/OpenAI-compatible LLM이 살아 있으면 LLM action JSON을 우선 사용합니다. LLM이 꺼져 있거나 검증용으로 명시하면 `vision_rule`이 비전 결과의 confident ASDW detections를 `press_sequence` action JSON으로 바꿉니다. 두 경로 모두 Pydantic action schema와 confidence gate를 다시 통과해야 하며, 실제 입력은 `/agent/act`의 mode policy가 별도로 결정합니다.
 
 현재 후보 센서 판정:
 
