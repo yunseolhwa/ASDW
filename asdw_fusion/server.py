@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import logging
 import math
 import os
@@ -9,13 +10,13 @@ import threading
 import time
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import requests
 from fastapi import FastAPI
 from PIL import Image, ImageDraw, ImageFont, ImageOps
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 try:
     import cv2
@@ -28,6 +29,17 @@ else:
 
 KEYS = ("A", "S", "D", "W")
 LOGGER = logging.getLogger("asdw_fusion.server")
+DEFAULT_DAEMON_URL = "http://127.0.0.1:7870"
+DEFAULT_LLM_BASE_URL = "http://127.0.0.1:8000/v1"
+DEFAULT_LLM_MODEL = "Qwen/Qwen2.5-3B-Instruct"
+ACTIONABLE_AGENT_ACTIONS = {"press_sequence", "type_text"}
+
+
+def env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
 
 
 class PredictRequest(BaseModel):
@@ -49,7 +61,7 @@ class HealthResponse(BaseModel):
 
 
 class PollerConfig(BaseModel):
-    daemon_url: str = Field(default=os.getenv("ASDW_DAEMON_URL", "http://127.0.0.1:7870"))
+    daemon_url: str = Field(default=os.getenv("ASDW_DAEMON_URL", DEFAULT_DAEMON_URL))
     interval_sec: float = Field(default=5.0, ge=0.5)
     monitor: int = Field(default=1, ge=0)
     roi: str | None = Field(default=None)
@@ -72,7 +84,7 @@ class PollerStatus(BaseModel):
 
 
 class HeartbeatConfig(BaseModel):
-    daemon_url: str = Field(default=os.getenv("ASDW_DAEMON_URL", "http://127.0.0.1:7870"))
+    daemon_url: str = Field(default=os.getenv("ASDW_DAEMON_URL", DEFAULT_DAEMON_URL))
     interval_sec: float = Field(default=2.0, ge=0.2)
     timeout_sec: float = Field(default=1.0, ge=0.1, le=30.0)
 
@@ -89,6 +101,90 @@ class HeartbeatStatus(BaseModel):
     last_failure_at: float | None
     last_error: str | None
     last_payload: dict[str, Any] | None
+
+
+class LLMConfig(BaseModel):
+    base_url: str = Field(default_factory=lambda: os.getenv("ASDW_LLM_BASE_URL", DEFAULT_LLM_BASE_URL))
+    model: str = Field(default_factory=lambda: os.getenv("ASDW_LLM_MODEL", DEFAULT_LLM_MODEL))
+    timeout_sec: float = Field(default_factory=lambda: env_float("ASDW_LLM_TIMEOUT_SEC", 20.0), ge=0.1, le=300.0)
+    temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+    max_tokens: int = Field(default=384, ge=64, le=4096)
+
+
+class AgentActionDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    state: Literal["idle", "captcha_prompt", "typing_prompt", "blocked", "unknown", "error"]
+    action: Literal["none", "press_sequence", "type_text", "retry_capture", "stop"]
+    keys: list[str] = Field(default_factory=list)
+    text: str | None = Field(default=None, max_length=200)
+    confidence: float = Field(ge=0.0, le=1.0)
+    reason: str = Field(min_length=1, max_length=500)
+
+    @field_validator("keys")
+    @classmethod
+    def normalize_keys(cls, keys: list[str]) -> list[str]:
+        normalized = [str(key).upper() for key in keys]
+        invalid = [key for key in normalized if key not in KEYS]
+        if invalid:
+            raise ValueError(f"keys must contain only A/S/D/W: {invalid}")
+        return normalized
+
+    @field_validator("text")
+    @classmethod
+    def normalize_text(cls, text: str | None) -> str | None:
+        if text is None:
+            return None
+        text = text.strip()
+        return text or None
+
+    @field_validator("reason")
+    @classmethod
+    def normalize_reason(cls, reason: str) -> str:
+        return reason.strip()
+
+    @model_validator(mode="after")
+    def validate_action_payload(self) -> "AgentActionDecision":
+        if self.action == "press_sequence":
+            if not self.keys:
+                raise ValueError("press_sequence requires non-empty keys")
+            if self.text is not None:
+                raise ValueError("press_sequence must not include text")
+        elif self.action == "type_text":
+            if not self.text:
+                raise ValueError("type_text requires text")
+            if self.keys:
+                raise ValueError("type_text must not include keys")
+        else:
+            if self.keys:
+                raise ValueError(f"{self.action} must not include keys")
+            if self.text is not None:
+                raise ValueError(f"{self.action} must not include text")
+        return self
+
+
+class AgentStepRequest(BaseModel):
+    daemon_url: str = Field(default_factory=lambda: os.getenv("ASDW_DAEMON_URL", DEFAULT_DAEMON_URL))
+    monitor: int = Field(default=1, ge=0)
+    roi: str | None = Field(default=None)
+    sensors: list[str] = Field(default_factory=lambda: ["template", "classifier"])
+    debug: bool = False
+    mode: Literal["observe", "rehearse", "live"] = "observe"
+    context: dict[str, Any] = Field(default_factory=dict)
+    llm: LLMConfig = Field(default_factory=LLMConfig)
+    min_action_confidence: float = Field(
+        default_factory=lambda: env_float("ASDW_AGENT_MIN_CONFIDENCE", 0.60),
+        ge=0.0,
+        le=1.0,
+    )
+
+
+class AgentActRequest(AgentStepRequest):
+    allow_live_input: bool = False
+    decision: AgentActionDecision | None = None
+    keep_daemon_queue: bool = False
+    daemon_wait: bool = True
+    daemon_timeout_sec: float = Field(default=30.0, ge=0.1, le=300.0)
 
 
 @dataclass
@@ -348,6 +444,32 @@ class HeartbeatMonitor:
             self.last_error = error
 
 
+class AgentRuntimeState:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.mode: Literal["observe", "rehearse", "live"] = "observe"
+        self.last_step: dict[str, Any] | None = None
+        self.last_act: dict[str, Any] | None = None
+
+    def record_step(self, mode: Literal["observe", "rehearse", "live"], result: dict[str, Any]) -> None:
+        with self._lock:
+            self.mode = mode
+            self.last_step = result
+
+    def record_act(self, mode: Literal["observe", "rehearse", "live"], result: dict[str, Any]) -> None:
+        with self._lock:
+            self.mode = mode
+            self.last_act = result
+
+    def status(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "mode": self.mode,
+                "last_step": self.last_step,
+                "last_act": self.last_act,
+            }
+
+
 class ModelHub:
     def __init__(self) -> None:
         self.torch = None
@@ -539,6 +661,7 @@ class ModelHub:
 MODEL_HUB = ModelHub()
 HEARTBEAT = HeartbeatMonitor()
 POLLER = DaemonPoller()
+AGENT_RUNTIME = AgentRuntimeState()
 app = FastAPI(title="ASDW Fusion Typer", version="0.1.0")
 
 
@@ -605,6 +728,33 @@ def poller_tick(config: PollerConfig) -> dict[str, Any]:
     return tick
 
 
+@app.post("/llm/check")
+def llm_check(config: LLMConfig | None = None) -> dict[str, Any]:
+    if config is None:
+        config = LLMConfig(timeout_sec=env_float("ASDW_LLM_CHECK_TIMEOUT_SEC", 2.0))
+    return check_llm(config)
+
+
+@app.post("/agent/step")
+def agent_step(request: AgentStepRequest) -> dict[str, Any]:
+    return run_agent_step(request)
+
+
+@app.post("/agent/act")
+def agent_act(request: AgentActRequest) -> dict[str, Any]:
+    return run_agent_act(request)
+
+
+@app.get("/agent/status")
+def agent_status() -> dict[str, Any]:
+    return build_agent_status()
+
+
+@app.get("/daemon/status")
+def daemon_status() -> dict[str, Any]:
+    return build_agent_status()
+
+
 @app.post("/predict")
 def predict(request: PredictRequest) -> dict[str, Any]:
     started = time.perf_counter()
@@ -652,6 +802,359 @@ def predict(request: PredictRequest) -> dict[str, Any]:
             ],
         }
     return response
+
+
+def check_llm(config: LLMConfig) -> dict[str, Any]:
+    started = time.perf_counter()
+    try:
+        response = requests.get(openai_url(config.base_url, "models"), timeout=config.timeout_sec)
+        rtt_ms = round((time.perf_counter() - started) * 1000, 3)
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:
+        return {
+            "ok": False,
+            "base_url": config.base_url,
+            "model": config.model,
+            "rtt_ms": round((time.perf_counter() - started) * 1000, 3),
+            "error": str(exc),
+        }
+
+    available_models = [
+        str(item.get("id"))
+        for item in payload.get("data", [])
+        if isinstance(item, dict) and item.get("id")
+    ]
+    return {
+        "ok": True,
+        "base_url": config.base_url,
+        "model": config.model,
+        "model_available": not available_models or config.model in available_models,
+        "available_models": available_models,
+        "rtt_ms": rtt_ms,
+    }
+
+
+def run_agent_step(request: AgentStepRequest) -> dict[str, Any]:
+    started = time.perf_counter()
+    frame: dict[str, Any] | None = None
+    prediction: dict[str, Any] | None = None
+
+    try:
+        frame = fetch_daemon_frame(request.daemon_url, request.monitor, request.roi)
+        prediction = predict(
+            PredictRequest(
+                image_b64=str(frame["image_b64"]),
+                sensors=request.sensors,
+                debug=request.debug,
+            )
+        )
+    except Exception as exc:
+        decision = blocked_decision(f"Capture or vision prediction failed: {exc}", state="error")
+        result = {
+            "ok": False,
+            "mode": request.mode,
+            "timestamp": time.time(),
+            "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+            "frame": frame_metadata(frame),
+            "prediction": prediction_summary(prediction),
+            "decision": decision.model_dump(),
+            "executable": False,
+            "error": str(exc),
+        }
+        AGENT_RUNTIME.record_step(request.mode, result)
+        return result
+
+    llm_result = call_llm_controller(request, frame, prediction)
+    llm_error: str | None = None
+    if llm_result.get("ok"):
+        decision = llm_result["decision"]
+    else:
+        llm_error = str(llm_result.get("error", "LLM controller failed"))
+        decision = blocked_decision(llm_error)
+
+    decision, gate_reason = gate_agent_decision(decision, prediction, request.min_action_confidence)
+    blocked_reason = gate_reason or llm_error
+    result = {
+        "ok": bool(llm_result.get("ok")) and gate_reason is None,
+        "mode": request.mode,
+        "timestamp": time.time(),
+        "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+        "frame": frame_metadata(frame),
+        "prediction": prediction_summary(prediction),
+        "llm": {
+            "ok": bool(llm_result.get("ok")),
+            "base_url": request.llm.base_url,
+            "model": request.llm.model,
+            "rtt_ms": llm_result.get("rtt_ms"),
+            "error": llm_result.get("error"),
+        },
+        "decision": decision.model_dump(),
+        "blocked_reason": blocked_reason,
+        "executable": is_executable_decision(decision),
+    }
+    AGENT_RUNTIME.record_step(request.mode, result)
+    return result
+
+
+def run_agent_act(request: AgentActRequest) -> dict[str, Any]:
+    started = time.perf_counter()
+    step: dict[str, Any] | None = None
+    decision = request.decision
+
+    if decision is None:
+        step_request = AgentStepRequest(
+            **request.model_dump(
+                exclude={
+                    "allow_live_input",
+                    "decision",
+                    "keep_daemon_queue",
+                    "daemon_wait",
+                    "daemon_timeout_sec",
+                }
+            )
+        )
+        step = run_agent_step(step_request)
+        decision = AgentActionDecision.model_validate(step["decision"])
+        if not step.get("ok", False):
+            result = {
+                "ok": False,
+                "mode": request.mode,
+                "timestamp": time.time(),
+                "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+                "step": step,
+                "decision": decision.model_dump(),
+                "action_result": {"ok": False, "status": "blocked", "reason": step.get("blocked_reason") or step.get("error")},
+            }
+            AGENT_RUNTIME.record_act(request.mode, result)
+            return result
+
+    decision, gate_reason = gate_agent_decision(decision, None, request.min_action_confidence)
+    if gate_reason is not None:
+        action_result = {"ok": False, "status": "blocked", "reason": gate_reason}
+    else:
+        action_result = execute_agent_decision(decision, request)
+
+    result = {
+        "ok": bool(action_result.get("ok", False)),
+        "mode": request.mode,
+        "timestamp": time.time(),
+        "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+        "step": step,
+        "decision": decision.model_dump(),
+        "action_result": action_result,
+    }
+    AGENT_RUNTIME.record_act(request.mode, result)
+    return result
+
+
+def fetch_daemon_frame(daemon_url: str, monitor: int, roi: str | None) -> dict[str, Any]:
+    params: dict[str, Any] = {"monitor": monitor}
+    if roi:
+        params["roi"] = roi
+    response = requests.post(f"{daemon_url.rstrip('/')}/frame_base64", params=params, timeout=10)
+    response.raise_for_status()
+    return response.json()
+
+
+def call_llm_controller(
+    request: AgentStepRequest,
+    frame: dict[str, Any],
+    prediction: dict[str, Any],
+) -> dict[str, Any]:
+    messages = build_agent_messages(request, frame, prediction)
+    payload = {
+        "model": request.llm.model,
+        "messages": messages,
+        "temperature": request.llm.temperature,
+        "max_tokens": request.llm.max_tokens,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "asdw_agent_action",
+                "schema": AgentActionDecision.model_json_schema(),
+            },
+        },
+    }
+    started = time.perf_counter()
+    try:
+        response = requests.post(
+            openai_url(request.llm.base_url, "chat/completions"),
+            json=payload,
+            timeout=request.llm.timeout_sec,
+        )
+        rtt_ms = round((time.perf_counter() - started) * 1000, 3)
+        response.raise_for_status()
+        response_payload = response.json()
+        content = extract_chat_content(response_payload)
+        decision = parse_agent_decision(content)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "rtt_ms": round((time.perf_counter() - started) * 1000, 3),
+            "error": str(exc),
+        }
+    return {
+        "ok": True,
+        "rtt_ms": rtt_ms,
+        "decision": decision,
+    }
+
+
+def build_agent_messages(
+    request: AgentStepRequest,
+    frame: dict[str, Any],
+    prediction: dict[str, Any],
+) -> list[dict[str, str]]:
+    system = (
+        "You are the local ASDW input controller. Choose one action for the Windows input daemon. "
+        "Return only JSON that matches the provided schema. Valid press_sequence keys are A, S, D, W. "
+        "If the visual evidence is empty or uncertain, choose retry_capture, none, or stop instead of inventing keys."
+    )
+    user_payload = {
+        "task": "Decide the next input action for the ASDW prompt automation.",
+        "safety_mode": request.mode,
+        "min_action_confidence": request.min_action_confidence,
+        "frame": frame_metadata(frame),
+        "prediction": prediction_summary(prediction),
+        "context": request.context,
+        "allowed_states": ["idle", "captcha_prompt", "typing_prompt", "blocked", "unknown", "error"],
+        "allowed_actions": ["none", "press_sequence", "type_text", "retry_capture", "stop"],
+    }
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+    ]
+
+
+def parse_agent_decision(content: Any) -> AgentActionDecision:
+    if isinstance(content, dict):
+        return AgentActionDecision.model_validate(content)
+    if not isinstance(content, str):
+        raise ValueError("LLM response content is not a JSON string")
+    return AgentActionDecision.model_validate_json(content)
+
+
+def extract_chat_content(payload: dict[str, Any]) -> Any:
+    choices = payload.get("choices")
+    if not choices:
+        raise ValueError("LLM response did not include choices")
+    message = choices[0].get("message") if isinstance(choices[0], dict) else None
+    if not isinstance(message, dict) or "content" not in message:
+        raise ValueError("LLM response did not include message.content")
+    return message["content"]
+
+
+def gate_agent_decision(
+    decision: AgentActionDecision,
+    prediction: dict[str, Any] | None,
+    min_confidence: float,
+) -> tuple[AgentActionDecision, str | None]:
+    if decision.state in {"blocked", "error"} and decision.action in ACTIONABLE_AGENT_ACTIONS:
+        reason = f"Action {decision.action} is not allowed while state is {decision.state}."
+        return blocked_decision(reason), reason
+    if decision.action in ACTIONABLE_AGENT_ACTIONS and decision.confidence < min_confidence:
+        reason = f"LLM confidence {decision.confidence:.2f} is below required {min_confidence:.2f}."
+        return blocked_decision(reason), reason
+    if prediction is not None and decision.action == "press_sequence" and not prediction.get("detections"):
+        reason = "Vision prediction returned no detections; press_sequence is blocked."
+        return blocked_decision(reason), reason
+    return decision, None
+
+
+def execute_agent_decision(decision: AgentActionDecision, request: AgentActRequest) -> dict[str, Any]:
+    if not is_executable_decision(decision):
+        return {"ok": True, "status": "skipped", "reason": f"action {decision.action} does not require input"}
+    if request.mode == "observe":
+        return {"ok": True, "status": "skipped", "reason": "observe mode never sends input"}
+    if request.mode == "live" and not request.allow_live_input:
+        return {"ok": False, "status": "blocked", "reason": "live mode requires allow_live_input=true"}
+
+    dry_run = request.mode != "live"
+    queue = {
+        "keep_queue": request.keep_daemon_queue,
+        "wait": request.daemon_wait,
+        "timeout_sec": request.daemon_timeout_sec,
+    }
+    if decision.action == "press_sequence":
+        endpoint = "/keys/press"
+        body: dict[str, Any] = {"keys": decision.keys, "dry_run": dry_run, "queue": queue}
+    else:
+        endpoint = "/text/type_keys"
+        body = {"text": decision.text, "dry_run": dry_run, "queue": queue}
+
+    try:
+        response = requests.post(
+            f"{request.daemon_url.rstrip('/')}{endpoint}",
+            json=body,
+            timeout=max(15.0, request.daemon_timeout_sec + 5.0),
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:
+        return {"ok": False, "status": "failed", "dry_run": dry_run, "error": str(exc)}
+    return {"ok": bool(payload.get("ok", False)), "status": payload.get("status", "completed"), "dry_run": dry_run, "daemon": payload}
+
+
+def build_agent_status() -> dict[str, Any]:
+    heartbeat_config = HeartbeatConfig(timeout_sec=env_float("ASDW_DAEMON_STATUS_TIMEOUT_SEC", 1.0))
+    llm_config = LLMConfig(timeout_sec=env_float("ASDW_LLM_STATUS_TIMEOUT_SEC", 1.0))
+    return {
+        "ok": True,
+        "timestamp": time.time(),
+        "vision": {
+            "ok": cv2 is not None,
+            "device": MODEL_HUB.device,
+            "sensors_loaded": sorted(MODEL_HUB.loaded),
+            "cv2": cv2 is not None,
+        },
+        "daemon": HEARTBEAT.ping_once(heartbeat_config),
+        "llm": check_llm(llm_config),
+        "agent": AGENT_RUNTIME.status(),
+    }
+
+
+def prediction_summary(prediction: dict[str, Any] | None) -> dict[str, Any] | None:
+    if prediction is None:
+        return None
+    return {
+        "sequence": prediction.get("sequence"),
+        "sequence_text": prediction.get("sequence_text"),
+        "detections": prediction.get("detections", []),
+        "latency_ms": prediction.get("latency_ms"),
+        "sensors": prediction.get("sensors"),
+        "device": prediction.get("device"),
+    }
+
+
+def frame_metadata(frame: dict[str, Any] | None) -> dict[str, Any] | None:
+    if frame is None:
+        return None
+    return {
+        "width": frame.get("width"),
+        "height": frame.get("height"),
+        "roi": frame.get("roi"),
+        "full_monitor": frame.get("full_monitor"),
+    }
+
+
+def blocked_decision(reason: str, state: Literal["blocked", "error"] = "blocked") -> AgentActionDecision:
+    return AgentActionDecision(
+        state=state,
+        action="none",
+        keys=[],
+        text=None,
+        confidence=0.0,
+        reason=reason[:500] or "blocked",
+    )
+
+
+def is_executable_decision(decision: AgentActionDecision) -> bool:
+    return decision.action in ACTIONABLE_AGENT_ACTIONS and decision.state not in {"blocked", "error"}
+
+
+def openai_url(base_url: str, path: str) -> str:
+    return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
 
 
 def normalize_sensor_list(sensors: list[str] | None) -> list[str]:

@@ -2,12 +2,14 @@
 
 Minecraft 화면 중앙에 뜨는 `A`, `S`, `D`, `W` 프롬프트를 캡처해서 왼쪽부터 하나씩 입력하는 실험 프로젝트입니다.
 
-구조는 두 프로세스입니다.
+구조는 두 프로세스와 한 개의 agent 컨트롤 계층입니다.
 
-- WSL ROCm: Hugging Face 모델과 OpenCV 기반 추론 서버
-- Windows: 화면 캡처, 서버 호출, 키 입력 클라이언트
+- WSL ROCm: Hugging Face/OpenCV 기반 비전 추론 서버와 로컬 LLM agent 컨트롤러
+- Windows: 화면 캡처와 `SendInput` 키 입력을 담당하는 캡처 데몬
+- Legacy Windows client: `client_windows.py`는 직접 캡처/입력 디버그용으로만 유지
 
 Windows 데몬 API의 키 입력 기본값은 실제 입력입니다. 검증만 할 때는 요청에 `dry_run = $true`를 명시하세요.
+Agent 계열 API의 기본 모드는 `observe`라 실제 입력을 보내지 않습니다.
 
 ## Codex 프로젝트 설정
 
@@ -67,17 +69,19 @@ powershell -ExecutionPolicy Bypass -File .\scripts\setup_windows_client.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\run_server_wsl.ps1 -Sensors "template,classifier"
 ```
 
-클라이언트 dry-run:
+Legacy 클라이언트 dry-run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\run_client_windows.ps1 -Sensors "template,classifier" -DebugDir "D:\asdw-fusion-typer\debug"
 ```
 
-실제 입력:
+Legacy 클라이언트 실제 입력:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\run_client_windows.ps1 -Sensors "template,classifier" -LiveInput
 ```
+
+운영 경로는 Windows 캡처 데몬과 WSL 서버 API입니다. `client_windows.py`는 데몬 경로가 깨졌을 때 비교 검증하는 직접 실행 도구로만 쓰세요.
 
 ## Windows 캡처 데몬
 
@@ -248,6 +252,69 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:7868/heartbeat/stop"
 ```
 
 로컬 LLM 상태머신 확장 계획은 `TODO-local-daemon-and-llm.md`에 정리했습니다.
+
+## LLM agent 컨트롤러
+
+WSL 서버는 SGLang OpenAI-compatible endpoint를 우선 사용해 action JSON을 생성합니다. 기본값:
+
+```text
+ASDW_LLM_BASE_URL=http://127.0.0.1:8000/v1
+ASDW_LLM_MODEL=Qwen/Qwen2.5-3B-Instruct
+ASDW_AGENT_MIN_CONFIDENCE=0.60
+```
+
+Agent action schema:
+
+```json
+{
+  "state": "idle|captcha_prompt|typing_prompt|blocked|unknown|error",
+  "action": "none|press_sequence|type_text|retry_capture|stop",
+  "keys": ["A", "S", "D", "W"],
+  "text": "optional text",
+  "confidence": 0.0,
+  "reason": "short reason"
+}
+```
+
+주요 endpoint:
+
+```text
+POST http://127.0.0.1:7868/llm/check
+POST http://127.0.0.1:7868/agent/step
+POST http://127.0.0.1:7868/agent/act
+GET  http://127.0.0.1:7868/agent/status
+GET  http://127.0.0.1:7868/daemon/status
+```
+
+`/agent/step`은 캡처, 비전 추론, LLM 판단까지만 수행하고 입력하지 않습니다.
+
+```powershell
+$body = @{
+  daemon_url = "http://127.0.0.1:7870"
+  monitor = 1
+  sensors = @("template", "classifier")
+  mode = "observe"
+} | ConvertTo-Json -Depth 4
+
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:7868/agent/step" -ContentType "application/json" -Body $body
+```
+
+`/agent/act`는 모드별 안전 정책을 적용합니다.
+
+- `observe`: 기본값. 입력하지 않습니다.
+- `rehearse`: daemon에 `dry_run=true`로 보내 큐와 타이밍만 검증합니다.
+- `live`: 실제 입력입니다. 반드시 `allow_live_input = $true`를 같이 보내야 합니다.
+
+```powershell
+$body = @{
+  daemon_url = "http://127.0.0.1:7870"
+  monitor = 1
+  sensors = @("template", "classifier")
+  mode = "rehearse"
+} | ConvertTo-Json -Depth 4
+
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:7868/agent/act" -ContentType "application/json" -Body $body
+```
 
 ## ROI 조정
 

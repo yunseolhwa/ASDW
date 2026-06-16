@@ -1,6 +1,6 @@
 # TODO: Local Daemon and LLM Controller
 
-이 문서는 현재 Windows 캡처 데몬을 수동 운영 상태로 두고, 나중에 로컬 LLM 모델이 들어왔을 때 상태체크/상태머신 로직을 붙이기 위한 작업 목록입니다.
+이 문서는 Windows 캡처 데몬과 WSL 비전/LLM 컨트롤러를 운영 경로로 고정하기 위한 작업 목록입니다.
 
 ## 현재 운영 방식
 
@@ -44,9 +44,9 @@ Invoke-WebRequest `
 http://127.0.0.1:7870/stream?monitor=1&fps=8
 ```
 
-## 나중에 붙일 로컬 LLM 역할
+## 로컬 LLM 역할
 
-LLM은 비전 분류기가 아니라 상태 컨트롤러입니다.
+LLM은 비전 분류기가 아니라 action 컨트롤러입니다. 현재 구현은 SGLang OpenAI-compatible endpoint를 우선 사용하고, WSL 서버가 JSON schema로 action을 검증한 뒤 Windows 데몬에 실행을 위임합니다.
 
 - 현재 화면 상태 판정
 - 어떤 센서를 더 볼지 결정
@@ -66,9 +66,29 @@ LLM은 비전 분류기가 아니라 상태 컨트롤러입니다.
 }
 ```
 
-## 데몬에 추가할 상태체크 로직
+## 구현된 LLM/agent API
 
-로컬 LLM이 들어오면 Windows 캡처 데몬 또는 상위 orchestrator에 다음 상태체크를 추가합니다.
+- `POST /llm/check`
+  - SGLang-compatible `/v1/models` 상태 확인
+  - base URL, 모델명, RTT, 오류 반환
+- `POST /agent/step`
+  - Windows 데몬 캡처
+  - 비전 추론
+  - LLM action JSON 생성
+  - Pydantic schema 재검증
+  - 실제 입력 없음
+- `POST /agent/act`
+  - `observe`: 입력 없음
+  - `rehearse`: Windows 데몬에 `dry_run=true`
+  - `live`: `allow_live_input=true`일 때만 실제 입력
+- `GET /agent/status`
+  - 비전 서버, Windows 데몬, LLM, 마지막 step/act 상태 반환
+- `GET /daemon/status`
+  - TODO 호환 alias
+
+## 추가 상태체크 로직
+
+남은 운영 고정 시 다음 상태체크를 더 구체화합니다.
 
 - LLM 서버 상태 확인
   - `/health` 또는 OpenAI-compatible `/v1/models`
@@ -138,23 +158,12 @@ LLM은 비전 분류기가 아니라 상태 컨트롤러입니다.
 
 ## API 확장 TODO
 
-- `GET /daemon/status`
-  - 캡처 데몬, 비전 서버, LLM 서버 상태를 한 번에 반환
-- `POST /agent/step`
-  - 전체 화면 캡처
-  - 비전 추론
-  - 상태 업데이트
-  - LLM 판단
-  - 액션 JSON 반환
-- `POST /agent/act`
-  - `agent/step` 결과를 실제 키 입력까지 실행
-  - 기본은 dry-run
-- `POST /llm/check`
-  - 로컬 LLM endpoint 상태 확인
 - `POST /config`
   - LLM base URL, 모델명, FPS, JPEG 품질, dry-run 설정 변경
 - `GET /config`
   - 현재 설정 조회
+- agent prompt/profile 버전 노출
+- 마지막 LLM raw error와 schema validation error의 요약 노출
 
 ## 로컬 LLM 백엔드 후보
 
@@ -180,16 +189,17 @@ ASDW_LLM_MODEL=Qwen/Qwen2.5-3B-Instruct
 ## 우선순위
 
 1. 지금은 캡처 데몬을 수동으로 켜고 끄는 방식 유지
-2. 비전 서버와 캡처 데몬을 안정화
-3. LLM 서버가 정해지면 `/llm/check` 추가
-4. deterministic FSM 먼저 작성
-5. 애매한 상태에서만 LLM 호출
-6. `agent/step`과 `agent/act` 분리
+2. SGLang 서버 실행 방식과 모델명을 환경 고정
+3. agent API를 `observe`/`rehearse`로 반복 검증
+4. `live` 모드는 명시 승인 경로로만 사용
+5. Windows Service 등록과 재시작 정책 고정
+6. `/config` API와 profile 버전 관리 추가
 
 ## 주의
 
-- 매 프레임 LLM을 호출하지 않습니다.
-- 키 입력 루프는 deterministic rule이 우선입니다.
-- LLM은 판단이 애매한 순간의 advisor로 둡니다.
+- `agent/step`은 입력하지 않습니다.
+- `agent/act`의 기본 모드는 `observe`입니다.
+- `live` 입력은 `allow_live_input=true` 없이는 실행하지 않습니다.
+- schema validation, 낮은 confidence, 빈 비전 결과는 입력을 차단합니다.
 - 로컬 모델만 사용합니다.
 - 외부 API 의존성을 운영 경로에 넣지 않습니다.
