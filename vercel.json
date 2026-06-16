@@ -1,0 +1,5 @@
+{
+  "installCommand": "cd research/public_equity_theme_schema/visual_onboarding && npm install",
+  "buildCommand": "cd research/public_equity_theme_schema/visual_onboarding && npm run build",
+  "outputDirectory": "research/public_equity_theme_schema/visual_onboarding/dist"
+}

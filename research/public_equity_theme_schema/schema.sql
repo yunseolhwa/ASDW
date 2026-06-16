@@ -1,6 +1,12 @@
 PRAGMA foreign_keys = ON;
 PRAGMA journal_mode = WAL;
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;
+
+CREATE TABLE schema_migrations (
+  migration_id TEXT PRIMARY KEY,
+  applied_at TEXT NOT NULL DEFAULT (datetime('now')),
+  description TEXT NOT NULL
+);
 
 CREATE TABLE themes (
   theme_id INTEGER PRIMARY KEY,
@@ -485,6 +491,318 @@ CREATE TABLE data_quality_flags (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE pm_sessions (
+  session_id INTEGER PRIMARY KEY,
+  theme_id INTEGER NOT NULL REFERENCES themes(theme_id) ON DELETE CASCADE,
+  screen_run_id INTEGER NOT NULL REFERENCES screen_runs(screen_run_id) ON DELETE CASCADE,
+  session_style TEXT NOT NULL
+    CHECK (session_style IN (
+      'public_equity_diligence',
+      'long_short_hf',
+      'long_only_pm'
+    )),
+  session_label TEXT NOT NULL,
+  objective TEXT NOT NULL,
+  owner_role TEXT NOT NULL DEFAULT 'PM',
+  as_of_date TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'completed'
+    CHECK (status IN ('draft', 'completed', 'superseded')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (screen_run_id, session_style)
+);
+
+CREATE TABLE pm_session_candidates (
+  session_candidate_id INTEGER PRIMARY KEY,
+  session_id INTEGER NOT NULL REFERENCES pm_sessions(session_id) ON DELETE CASCADE,
+  security_id INTEGER NOT NULL REFERENCES securities(security_id) ON DELETE CASCADE,
+  pathway_id INTEGER NOT NULL REFERENCES theme_pathways(pathway_id) ON DELETE CASCADE,
+  decision_bucket TEXT NOT NULL
+    CHECK (decision_bucket IN (
+      'Advance to deeper work',
+      'Valuation / expectations gated',
+      'Exposure not yet proven',
+      'Deprioritized or reject',
+      'Long candidate',
+      'Short candidate',
+      'Pair / relative value candidate',
+      'Watchlist / needs trigger',
+      'Pass'
+    )),
+  actionability TEXT NOT NULL
+    CHECK (actionability IN (
+      'add',
+      'press',
+      'hold',
+      'trim',
+      'exit',
+      'cover',
+      'hedge',
+      'watchlist',
+      'pass',
+      'wait for proof',
+      're-underwrite',
+      'research only'
+    )),
+  direction TEXT NOT NULL DEFAULT 'diligence'
+    CHECK (direction IN ('long', 'short', 'pair', 'watchlist', 'diligence', 'none')),
+  variant_wedge TEXT NOT NULL,
+  why_now TEXT NOT NULL,
+  priced_in TEXT NOT NULL,
+  first_rejection TEXT NOT NULL,
+  investable_if TEXT NOT NULL,
+  kill_if TEXT NOT NULL,
+  next_workflow TEXT NOT NULL DEFAULT 'none'
+    CHECK (next_workflow IN (
+      'earnings-deep-dive',
+      'equity-model-update',
+      'long-short-pitch',
+      'earnings-preview',
+      'thesis-tracker',
+      'portfolio-risk-management',
+      'event-driven-analyzer',
+      'economic-impact-report',
+      'catalyst-calendar',
+      'company-tearsheet',
+      'comps-valuation',
+      'dcf-model-builder',
+      'scenario-sensitivity-generator',
+      'memo-builder',
+      'credit-markets',
+      'none'
+    )),
+  is_actionable INTEGER NOT NULL DEFAULT 0 CHECK (is_actionable IN (0, 1)),
+  CHECK (is_actionable = 0 OR next_workflow <> 'none'),
+  UNIQUE (session_id, security_id)
+);
+
+CREATE TABLE pm_score_dimensions (
+  dimension_id INTEGER PRIMARY KEY,
+  session_style TEXT NOT NULL
+    CHECK (session_style IN (
+      'public_equity_diligence',
+      'long_short_hf',
+      'long_only_pm'
+    )),
+  dimension_name TEXT NOT NULL,
+  dimension_group TEXT NOT NULL,
+  weight REAL NOT NULL CHECK (weight >= 0),
+  direction TEXT NOT NULL DEFAULT 'higher_is_better'
+    CHECK (direction IN ('higher_is_better', 'lower_is_better', 'neutral')),
+  required_flag INTEGER NOT NULL DEFAULT 1 CHECK (required_flag IN (0, 1)),
+  UNIQUE (session_style, dimension_name)
+);
+
+CREATE TABLE pm_candidate_scores (
+  score_id INTEGER PRIMARY KEY,
+  session_candidate_id INTEGER NOT NULL REFERENCES pm_session_candidates(session_candidate_id) ON DELETE CASCADE,
+  dimension_id INTEGER NOT NULL REFERENCES pm_score_dimensions(dimension_id) ON DELETE RESTRICT,
+  raw_score REAL NOT NULL CHECK (raw_score BETWEEN 0 AND 100),
+  normalized_score REAL NOT NULL CHECK (normalized_score BETWEEN 0 AND 100),
+  evidence_id INTEGER REFERENCES evidence_items(evidence_id) ON DELETE SET NULL,
+  rationale TEXT NOT NULL,
+  UNIQUE (session_candidate_id, dimension_id)
+);
+
+CREATE TABLE pm_decision_gates (
+  gate_id INTEGER PRIMARY KEY,
+  session_candidate_id INTEGER NOT NULL REFERENCES pm_session_candidates(session_candidate_id) ON DELETE CASCADE,
+  gate_name TEXT NOT NULL
+    CHECK (gate_name IN (
+      'exposure_proof',
+      'source_pack',
+      'valuation',
+      'catalyst',
+      'liquidity',
+      'borrow_crowding',
+      'benchmark_fit',
+      'risk_reward',
+      'data_freshness',
+      'other'
+    )),
+  gate_status TEXT NOT NULL
+    CHECK (gate_status IN ('pass', 'watch', 'fail', 'not_applicable')),
+  gate_reason TEXT NOT NULL,
+  evidence_id INTEGER REFERENCES evidence_items(evidence_id) ON DELETE SET NULL,
+  required_flag INTEGER NOT NULL DEFAULT 1 CHECK (required_flag IN (0, 1)),
+  reviewed_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (session_candidate_id, gate_name)
+);
+
+CREATE TABLE pm_cross_session_conflicts (
+  conflict_id INTEGER PRIMARY KEY,
+  screen_run_id INTEGER NOT NULL REFERENCES screen_runs(screen_run_id) ON DELETE CASCADE,
+  security_id INTEGER NOT NULL REFERENCES securities(security_id) ON DELETE CASCADE,
+  conflict_type TEXT NOT NULL
+    CHECK (conflict_type IN (
+      'style_divergence',
+      'direction_conflict',
+      'gate_conflict',
+      'data_gap',
+      'workflow_conflict',
+      'other'
+    )),
+  diligence_decision TEXT,
+  long_short_decision TEXT,
+  long_only_decision TEXT,
+  resolution_note TEXT NOT NULL,
+  next_research_owner TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open'
+    CHECK (status IN ('open', 'resolved', 'deferred')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (screen_run_id, security_id, conflict_type)
+);
+
+CREATE TABLE freshness_policies (
+  policy_id INTEGER PRIMARY KEY,
+  data_table TEXT NOT NULL
+    CHECK (data_table IN (
+      'market_observations',
+      'valuation_snapshots',
+      'estimate_snapshots',
+      'estimate_revisions',
+      'company_metric_facts'
+    )),
+  observation_type TEXT,
+  metric_name TEXT,
+  max_age_days INTEGER NOT NULL CHECK (max_age_days >= 0),
+  severity TEXT NOT NULL CHECK (severity IN ('low', 'medium', 'high')),
+  policy_notes TEXT NOT NULL,
+  CHECK (observation_type IS NOT NULL OR metric_name IS NOT NULL)
+);
+
+CREATE TABLE assumption_register (
+  assumption_id INTEGER PRIMARY KEY,
+  screen_run_id INTEGER REFERENCES screen_runs(screen_run_id) ON DELETE CASCADE,
+  session_id INTEGER REFERENCES pm_sessions(session_id) ON DELETE CASCADE,
+  security_id INTEGER REFERENCES securities(security_id) ON DELETE CASCADE,
+  assumption_text TEXT NOT NULL,
+  sensitivity TEXT NOT NULL CHECK (sensitivity IN ('low', 'medium', 'high')),
+  evidence_gap TEXT,
+  owner_role TEXT NOT NULL,
+  review_by TEXT,
+  status TEXT NOT NULL DEFAULT 'open'
+    CHECK (status IN ('open', 'resolved', 'superseded')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  CHECK (screen_run_id IS NOT NULL OR session_id IS NOT NULL)
+);
+
+CREATE TABLE source_conflicts (
+  conflict_id INTEGER PRIMARY KEY,
+  screen_run_id INTEGER REFERENCES screen_runs(screen_run_id) ON DELETE CASCADE,
+  security_id INTEGER REFERENCES securities(security_id) ON DELETE CASCADE,
+  source_a_id INTEGER NOT NULL REFERENCES sources(source_id) ON DELETE CASCADE,
+  source_b_id INTEGER NOT NULL REFERENCES sources(source_id) ON DELETE CASCADE,
+  data_table TEXT NOT NULL,
+  row_a_pk TEXT,
+  row_b_pk TEXT,
+  metric_name TEXT,
+  value_a TEXT,
+  value_b TEXT,
+  conflict_summary TEXT NOT NULL,
+  resolution_status TEXT NOT NULL DEFAULT 'open'
+    CHECK (resolution_status IN ('open', 'resolved', 'deferred')),
+  resolution_note TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  CHECK (source_a_id <> source_b_id)
+);
+
+CREATE UNIQUE INDEX ux_freshness_policies_lookup
+  ON freshness_policies(data_table, ifnull(observation_type, ''), ifnull(metric_name, ''));
+
+CREATE TRIGGER pm_session_candidates_ai_actionable
+BEFORE INSERT ON pm_session_candidates
+WHEN new.is_actionable = 1
+  AND (
+    NOT EXISTS (
+      SELECT 1
+      FROM pm_sessions ps
+      JOIN theme_exposures te
+        ON te.screen_run_id = ps.screen_run_id
+        AND te.security_id = new.security_id
+      WHERE ps.session_id = new.session_id
+        AND te.exposure_type IN ('orders', 'backlog', 'revenue', 'margin', 'estimate_revision')
+        AND te.evidence_id IS NOT NULL
+    )
+    OR NOT EXISTS (
+      SELECT 1
+      FROM pm_decision_gates pdg
+      WHERE pdg.session_candidate_id = new.session_candidate_id
+        AND pdg.required_flag = 1
+        AND pdg.gate_status = 'pass'
+    )
+    OR EXISTS (
+      SELECT 1
+      FROM pm_decision_gates pdg
+      WHERE pdg.session_candidate_id = new.session_candidate_id
+        AND pdg.required_flag = 1
+        AND pdg.gate_status NOT IN ('pass', 'not_applicable')
+    )
+  )
+BEGIN
+  SELECT RAISE(ABORT, 'actionable PM candidate requires source-backed exposure and passed required gates');
+END;
+
+CREATE TRIGGER pm_session_candidates_au_actionable
+BEFORE UPDATE OF session_id, security_id, is_actionable ON pm_session_candidates
+WHEN new.is_actionable = 1
+  AND (
+    NOT EXISTS (
+      SELECT 1
+      FROM pm_sessions ps
+      JOIN theme_exposures te
+        ON te.screen_run_id = ps.screen_run_id
+        AND te.security_id = new.security_id
+      WHERE ps.session_id = new.session_id
+        AND te.exposure_type IN ('orders', 'backlog', 'revenue', 'margin', 'estimate_revision')
+        AND te.evidence_id IS NOT NULL
+    )
+    OR NOT EXISTS (
+      SELECT 1
+      FROM pm_decision_gates pdg
+      WHERE pdg.session_candidate_id = new.session_candidate_id
+        AND pdg.required_flag = 1
+        AND pdg.gate_status = 'pass'
+    )
+    OR EXISTS (
+      SELECT 1
+      FROM pm_decision_gates pdg
+      WHERE pdg.session_candidate_id = new.session_candidate_id
+        AND pdg.required_flag = 1
+        AND pdg.gate_status NOT IN ('pass', 'not_applicable')
+    )
+  )
+BEGIN
+  SELECT RAISE(ABORT, 'actionable PM candidate requires source-backed exposure and passed required gates');
+END;
+
+CREATE TRIGGER pm_candidate_scores_ai_dimension_style
+BEFORE INSERT ON pm_candidate_scores
+WHEN NOT EXISTS (
+  SELECT 1
+  FROM pm_session_candidates psc
+  JOIN pm_sessions ps ON ps.session_id = psc.session_id
+  JOIN pm_score_dimensions psd ON psd.dimension_id = new.dimension_id
+  WHERE psc.session_candidate_id = new.session_candidate_id
+    AND ps.session_style = psd.session_style
+)
+BEGIN
+  SELECT RAISE(ABORT, 'score dimension style must match candidate session style');
+END;
+
+CREATE TRIGGER pm_candidate_scores_au_dimension_style
+BEFORE UPDATE OF session_candidate_id, dimension_id ON pm_candidate_scores
+WHEN NOT EXISTS (
+  SELECT 1
+  FROM pm_session_candidates psc
+  JOIN pm_sessions ps ON ps.session_id = psc.session_id
+  JOIN pm_score_dimensions psd ON psd.dimension_id = new.dimension_id
+  WHERE psc.session_candidate_id = new.session_candidate_id
+    AND ps.session_style = psd.session_style
+)
+BEGIN
+  SELECT RAISE(ABORT, 'score dimension style must match candidate session style');
+END;
+
 CREATE INDEX idx_theme_pathways_theme_id ON theme_pathways(theme_id);
 CREATE INDEX idx_theme_keywords_theme_id ON theme_keywords(theme_id);
 CREATE INDEX idx_screen_runs_theme_id ON screen_runs(theme_id);
@@ -515,6 +833,14 @@ CREATE INDEX idx_candidate_events_source_id ON candidate_events(source_id);
 CREATE INDEX idx_false_positive_screen_security ON theme_false_positive_flags(screen_run_id, security_id);
 CREATE INDEX idx_false_positive_evidence_id ON theme_false_positive_flags(evidence_id);
 CREATE INDEX idx_workflow_handoffs_screen_security ON workflow_handoffs(screen_run_id, security_id);
+CREATE INDEX idx_pm_sessions_screen_style ON pm_sessions(screen_run_id, session_style);
+CREATE INDEX idx_pm_session_candidates_session_id ON pm_session_candidates(session_id);
+CREATE INDEX idx_pm_session_candidates_security_id ON pm_session_candidates(security_id);
+CREATE INDEX idx_pm_candidate_scores_dimension_id ON pm_candidate_scores(dimension_id);
+CREATE INDEX idx_pm_decision_gates_candidate_status ON pm_decision_gates(session_candidate_id, gate_status);
+CREATE INDEX idx_pm_conflicts_screen_security ON pm_cross_session_conflicts(screen_run_id, security_id);
+CREATE INDEX idx_assumption_register_session_id ON assumption_register(session_id);
+CREATE INDEX idx_source_conflicts_security_id ON source_conflicts(security_id);
 
 CREATE VIEW v_candidate_readiness AS
 SELECT
@@ -649,3 +975,195 @@ JOIN (SELECT DISTINCT screen_run_id, security_id FROM theme_universe) base
 JOIN estimate_revisions er
   ON er.security_id = base.security_id
 WHERE date(er.as_of_date) < date(sr.as_of_date);
+
+CREATE VIEW v_pm_session_candidate_readiness AS
+SELECT
+  psc.session_candidate_id,
+  ps.session_id,
+  ps.screen_run_id,
+  ps.session_style,
+  psc.security_id,
+  s.ticker_upper AS ticker,
+  e.legal_name,
+  psc.decision_bucket,
+  psc.actionability,
+  psc.next_workflow,
+  psc.is_actionable,
+  CASE
+    WHEN EXISTS (
+      SELECT 1
+      FROM theme_exposures te
+      WHERE te.screen_run_id = ps.screen_run_id
+        AND te.security_id = psc.security_id
+        AND te.exposure_type IN ('orders', 'backlog', 'revenue', 'margin', 'estimate_revision')
+        AND te.evidence_id IS NOT NULL
+    ) THEN 1
+    ELSE 0
+  END AS has_source_backed_exposure,
+  (
+    SELECT count(*)
+    FROM pm_decision_gates pdg
+    WHERE pdg.session_candidate_id = psc.session_candidate_id
+      AND pdg.required_flag = 1
+      AND pdg.gate_status = 'pass'
+  ) AS required_gate_pass_count,
+  (
+    SELECT count(*)
+    FROM pm_decision_gates pdg
+    WHERE pdg.session_candidate_id = psc.session_candidate_id
+      AND pdg.required_flag = 1
+      AND pdg.gate_status NOT IN ('pass', 'not_applicable')
+  ) AS required_gate_blocker_count,
+  CASE
+    WHEN psc.is_actionable = 1
+      AND psc.next_workflow <> 'none'
+      AND EXISTS (
+        SELECT 1
+        FROM theme_exposures te
+        WHERE te.screen_run_id = ps.screen_run_id
+          AND te.security_id = psc.security_id
+          AND te.exposure_type IN ('orders', 'backlog', 'revenue', 'margin', 'estimate_revision')
+          AND te.evidence_id IS NOT NULL
+      )
+      AND EXISTS (
+        SELECT 1
+        FROM pm_decision_gates pdg
+        WHERE pdg.session_candidate_id = psc.session_candidate_id
+          AND pdg.required_flag = 1
+          AND pdg.gate_status = 'pass'
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM pm_decision_gates pdg
+        WHERE pdg.session_candidate_id = psc.session_candidate_id
+          AND pdg.required_flag = 1
+          AND pdg.gate_status NOT IN ('pass', 'not_applicable')
+      )
+    THEN 1
+    ELSE 0
+  END AS handoff_allowed
+FROM pm_session_candidates psc
+JOIN pm_sessions ps ON ps.session_id = psc.session_id
+JOIN securities s ON s.security_id = psc.security_id
+JOIN entities e ON e.entity_id = s.entity_id;
+
+CREATE VIEW v_pm_active_handoff_violations AS
+SELECT *
+FROM v_pm_session_candidate_readiness
+WHERE is_actionable = 1
+  AND handoff_allowed = 0;
+
+CREATE VIEW v_policy_stale_data AS
+SELECT
+  sr.screen_run_id,
+  mo.security_id,
+  'market_observations' AS data_table,
+  mo.observation_id AS row_id,
+  mo.observation_type,
+  NULL AS metric_name,
+  mo.as_of_date,
+  sr.as_of_date AS screen_as_of_date,
+  fp.max_age_days,
+  fp.severity,
+  CAST(julianday(sr.as_of_date) - julianday(mo.as_of_date) AS INTEGER) AS stale_days
+FROM screen_runs sr
+JOIN (SELECT DISTINCT screen_run_id, security_id FROM theme_universe) base
+  ON base.screen_run_id = sr.screen_run_id
+JOIN market_observations mo
+  ON mo.security_id = base.security_id
+JOIN freshness_policies fp
+  ON fp.data_table = 'market_observations'
+  AND fp.observation_type = mo.observation_type
+WHERE CAST(julianday(sr.as_of_date) - julianday(mo.as_of_date) AS INTEGER) > fp.max_age_days
+UNION ALL
+SELECT
+  sr.screen_run_id,
+  vs.security_id,
+  'valuation_snapshots' AS data_table,
+  vs.snapshot_id AS row_id,
+  NULL AS observation_type,
+  vs.metric_name,
+  vs.as_of_date,
+  sr.as_of_date AS screen_as_of_date,
+  fp.max_age_days,
+  fp.severity,
+  CAST(julianday(sr.as_of_date) - julianday(vs.as_of_date) AS INTEGER) AS stale_days
+FROM screen_runs sr
+JOIN (SELECT DISTINCT screen_run_id, security_id FROM theme_universe) base
+  ON base.screen_run_id = sr.screen_run_id
+JOIN valuation_snapshots vs
+  ON vs.security_id = base.security_id
+JOIN freshness_policies fp
+  ON fp.data_table = 'valuation_snapshots'
+  AND fp.metric_name = vs.metric_name
+WHERE CAST(julianday(sr.as_of_date) - julianday(vs.as_of_date) AS INTEGER) > fp.max_age_days
+UNION ALL
+SELECT
+  sr.screen_run_id,
+  es.security_id,
+  'estimate_snapshots' AS data_table,
+  es.estimate_id AS row_id,
+  NULL AS observation_type,
+  es.metric_name,
+  es.as_of_date,
+  sr.as_of_date AS screen_as_of_date,
+  fp.max_age_days,
+  fp.severity,
+  CAST(julianday(sr.as_of_date) - julianday(es.as_of_date) AS INTEGER) AS stale_days
+FROM screen_runs sr
+JOIN (SELECT DISTINCT screen_run_id, security_id FROM theme_universe) base
+  ON base.screen_run_id = sr.screen_run_id
+JOIN estimate_snapshots es
+  ON es.security_id = base.security_id
+JOIN freshness_policies fp
+  ON fp.data_table = 'estimate_snapshots'
+  AND fp.metric_name = es.metric_name
+WHERE CAST(julianday(sr.as_of_date) - julianday(es.as_of_date) AS INTEGER) > fp.max_age_days
+UNION ALL
+SELECT
+  sr.screen_run_id,
+  er.security_id,
+  'estimate_revisions' AS data_table,
+  er.revision_id AS row_id,
+  NULL AS observation_type,
+  er.metric_name,
+  er.as_of_date,
+  sr.as_of_date AS screen_as_of_date,
+  fp.max_age_days,
+  fp.severity,
+  CAST(julianday(sr.as_of_date) - julianday(er.as_of_date) AS INTEGER) AS stale_days
+FROM screen_runs sr
+JOIN (SELECT DISTINCT screen_run_id, security_id FROM theme_universe) base
+  ON base.screen_run_id = sr.screen_run_id
+JOIN estimate_revisions er
+  ON er.security_id = base.security_id
+JOIN freshness_policies fp
+  ON fp.data_table = 'estimate_revisions'
+  AND fp.metric_name = er.metric_name
+WHERE CAST(julianday(sr.as_of_date) - julianday(er.as_of_date) AS INTEGER) > fp.max_age_days
+UNION ALL
+SELECT
+  sr.screen_run_id,
+  s.security_id,
+  'company_metric_facts' AS data_table,
+  cmf.fact_id AS row_id,
+  NULL AS observation_type,
+  md.metric_name,
+  cmf.as_of_date,
+  sr.as_of_date AS screen_as_of_date,
+  fp.max_age_days,
+  fp.severity,
+  CAST(julianday(sr.as_of_date) - julianday(cmf.as_of_date) AS INTEGER) AS stale_days
+FROM screen_runs sr
+JOIN (SELECT DISTINCT screen_run_id, security_id FROM theme_universe) base
+  ON base.screen_run_id = sr.screen_run_id
+JOIN securities s
+  ON s.security_id = base.security_id
+JOIN company_metric_facts cmf
+  ON cmf.entity_id = s.entity_id
+JOIN metric_definitions md
+  ON md.metric_id = cmf.metric_id
+JOIN freshness_policies fp
+  ON fp.data_table = 'company_metric_facts'
+  AND fp.metric_name = md.metric_name
+WHERE CAST(julianday(sr.as_of_date) - julianday(cmf.as_of_date) AS INTEGER) > fp.max_age_days;

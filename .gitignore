@@ -9,6 +9,12 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
+# Node / frontend builds
+node_modules/
+dist/
+.vercel/
+*.tsbuildinfo
+
 # Local configuration
 .env
 .env.*
@@ -20,6 +26,8 @@ artifacts/
 
 # Generated training data and model outputs
 data/
+!research/public_equity_theme_schema/visual_onboarding/src/data/
+!research/public_equity_theme_schema/visual_onboarding/src/data/theme-dashboard-data.json
 models/
 
 # Local media/debug dumps
@@ -31,3 +39,4 @@ models/
 *.mp4
 *.avi
 *.jsonl
+.vercel

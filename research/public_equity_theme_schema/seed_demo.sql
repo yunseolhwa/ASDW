@@ -1,5 +1,8 @@
 PRAGMA foreign_keys = ON;
 
+INSERT INTO schema_migrations (migration_id, description) VALUES
+  ('001_theme_triage_core', 'Core public-equity theme triage schema and synthetic initial sample theme seed.');
+
 INSERT INTO themes (
   theme_id,
   theme_name,
@@ -45,7 +48,7 @@ INSERT INTO screen_runs (
 ) VALUES (
   1,
   1,
-  'AI infrastructure first-pass schema demo',
+  'AI infrastructure initial sample schema demo',
   '2026-06-16',
   'public_equity_diligence',
   'Liquid US-listed common equities; demo data only.',

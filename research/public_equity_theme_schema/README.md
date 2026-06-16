@@ -14,6 +14,7 @@ The schema follows the Public Equity Investing `idea-generation` workflow:
 - link thematic exposure to evidence;
 - score candidates across PM-relevant dimensions;
 - classify candidates into research-priority buckets;
+- run separate PM sessions for `public_equity_diligence`, `long_short_hf`, and `long_only_pm`;
 - hand off candidates to later workflows such as `earnings-deep-dive`, `equity-model-update`, or `long-short-pitch`.
 
 The Investment Banking tag is represented only as optional event metadata for capital-markets and transaction-like catalysts, such as `ecm`, `dcm`, `mna`, and `restructuring`. The schema does not create a banker execution workflow, CIM workflow, financing recommendation, or board package.
@@ -26,12 +27,18 @@ The Investment Banking tag is represented only as optional event metadata for ca
 - **Theme exposure must be proven.** `v_candidate_readiness` only marks a candidate as advance-eligible when exposure is source-backed by `orders`, `backlog`, `revenue`, `margin`, or `estimate_revision`.
 - **Keyword-only is not enough.** `keyword_only` and unsupported management-claim exposure remain `Exposure not yet proven`.
 - **As-of dates matter.** `v_stale_market_data` flags market, valuation, and estimate rows older than the screen run date.
+- **PM sessions stay separate.** `pm_sessions` and related tables preserve independent diligence, long/short, and long-only conclusions instead of blending them into one score.
+- **Actionability is gated.** `v_pm_session_candidate_readiness` and PM gate triggers require source-backed exposure and passed required gates before a PM session candidate can become actionable.
 
 ## Files
 
 - `schema.sql` - SQLite DDL, indexes, FTS5 table, triggers, and views.
-- `seed_demo.sql` - synthetic demo data for `AI infrastructure`.
+- `seed_demo.sql` - synthetic core demo data for the `AI infrastructure` initial sample theme.
+- `seed_pm_sessions.sql` - synthetic PM session seed data for three independent investment-style sessions.
+- `build_theme_database.py` - materializes a SQLite database from the schema and seed files.
 - `tests/validate_schema.py` - in-memory validation of DDL, seed data, constraints, FTS search, views, and handoffs.
+- `tests/validate_pm_database.py` - PM session validation plus file-database build validation.
+- `visual_onboarding/` - Vercel-ready React/Vite dashboard that visualizes the PM session board, workflow cockpit, and schema map from exported SQLite summary data.
 
 ## Table Groups
 
@@ -88,6 +95,20 @@ These tables store normalized facts and dated market inputs. They are designed f
 
 These tables store PM-style triage outputs: why a name surfaced, what might be priced in, first rejection risk, investability conditions, kill criteria, and next workflow.
 
+### PM Session Layer
+
+- `pm_sessions`
+- `pm_session_candidates`
+- `pm_score_dimensions`
+- `pm_candidate_scores`
+- `pm_decision_gates`
+- `pm_cross_session_conflicts`
+- `freshness_policies`
+- `assumption_register`
+- `source_conflicts`
+
+These tables let the same screen be reviewed as three separate PM sessions: public-equity diligence, long/short hedge fund, and long-only PM. A security can have different decision buckets, gates, actionability, and next workflows in each session.
+
 ## Example Queries
 
 Rank candidates by beneficiary pathway:
@@ -134,12 +155,52 @@ FROM v_stale_market_data
 ORDER BY security_id, data_table;
 ```
 
+Review separate PM session conclusions:
+
+```sql
+SELECT session_style, ticker, decision_bucket, actionability, next_workflow, handoff_allowed
+FROM v_pm_session_candidate_readiness
+ORDER BY ticker, session_style;
+```
+
+Find policy-based stale inputs:
+
+```sql
+SELECT screen_run_id, security_id, data_table, coalesce(observation_type, metric_name) AS data_key, stale_days, max_age_days
+FROM v_policy_stale_data
+ORDER BY security_id, data_table;
+```
+
+Review cross-session conflicts:
+
+```sql
+SELECT security_id, conflict_type, diligence_decision, long_short_decision, long_only_decision, resolution_note
+FROM pm_cross_session_conflicts
+ORDER BY security_id, conflict_type;
+```
+
 ## Validation
 
 Run from the repository root:
 
 ```powershell
 & "C:\Users\ROCmAdmin\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" .\research\public_equity_theme_schema\tests\validate_schema.py
+& "C:\Users\ROCmAdmin\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" .\research\public_equity_theme_schema\tests\validate_pm_database.py
+```
+
+Build a local SQLite artifact:
+
+```powershell
+& "C:\Users\ROCmAdmin\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" .\research\public_equity_theme_schema\build_theme_database.py --force
+```
+
+Run the visual onboarding dashboard locally:
+
+```powershell
+& "C:\Users\ROCmAdmin\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" .\research\public_equity_theme_schema\visual_onboarding\export_dashboard_data.py
+cd .\research\public_equity_theme_schema\visual_onboarding
+pnpm install
+pnpm run dev
 ```
 
 The validator checks:
@@ -156,6 +217,12 @@ The validator checks:
 - stale-data detection;
 - keyword-only non-readiness;
 - downstream handoffs.
+- three independent PM sessions;
+- session-specific decision buckets;
+- score dimension/session-style compatibility;
+- source-backed exposure and gate requirements for actionability;
+- policy-based stale-data detection;
+- generated SQLite database integrity, FTS search, and readiness views.
 
 ## Source Research Notes
 
@@ -172,6 +239,6 @@ The validator checks:
 ## Operating Assumptions
 
 - First implementation is schema and validation only, not live ingestion.
-- Default universe is liquid listed equities with U.S. SEC support first.
+- Initial sample universe is liquid listed equities with U.S. SEC support first.
 - Non-U.S. issuers are supported through generic source, identifier, metric, and document fields.
 - Stored language should remain `candidate`, `watchlist`, or `requires diligence`; it should not become a final trade recommendation.
