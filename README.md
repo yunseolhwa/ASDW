@@ -1,272 +1,73 @@
-# ASDW Fusion Typer
+# Public Equity Theme Research
 
-Minecraft 화면 중앙에 뜨는 `A`, `S`, `D`, `W` 프롬프트를 캡처해서 왼쪽부터 하나씩 입력하는 실험 프로젝트입니다.
+공개주식 테마를 투자 리서치 큐로 바꾸는 로컬 프로젝트입니다. 현재 기준점은 `codex/investing` 브랜치의 `13c3f94 온보드` 커밋입니다.
 
-구조는 두 프로세스입니다.
+이 저장소의 핵심 산출물은 다음 두 가지입니다.
 
-- WSL ROCm: Hugging Face 모델과 OpenCV 기반 추론 서버
-- Windows: 화면 캡처, 서버 호출, 키 입력 클라이언트
+- `research/public_equity_theme_schema/`: 공개주식 테마 스크리닝용 SQLite 스키마, seed 데이터, 검증 스크립트
+- `research/public_equity_theme_schema/visual_onboarding/`: PM 세션, 후보 종목, 게이트, 스키마 맵을 보여주는 React/Vite 온보딩 대시보드
 
-Windows 데몬 API의 키 입력 기본값은 실제 입력입니다. 검증만 할 때는 요청에 `dry_run = $true`를 명시하세요.
+이 프로젝트는 최종 매수/매도 추천 엔진이 아닙니다. 목적은 테마 후보를 `심화 리서치`, `트리거 대기`, `노출 증거 부족`, `제외` 같은 리서치 우선순위로 분류하는 것입니다.
 
-## Codex 프로젝트 설정
+## 현재 범위
 
-Codex 앱 Local Environment용 ASDW 설정은 `.codex/README.md`에 고정했습니다.
+- 테마, 수혜 경로, 후보 종목, 증거, 시장 데이터, 밸류에이션 snapshot을 정규화합니다.
+- 동일 후보를 `public_equity_diligence`, `long_short_hf`, `long_only_pm` 세션에서 따로 평가합니다.
+- source-backed exposure가 없는 후보는 advance 대상이 되지 않도록 gate를 둡니다.
+- 원본 provider payload와 사람이 읽는 evidence excerpt를 분리해서 보관합니다.
+- 시각화 대시보드는 SQLite 요약 JSON을 읽어 PM 보드, workflow cockpit, schema map을 보여줍니다.
 
-권장 구성:
+## 빠른 실행
 
-- Setup script: `powershell -ExecutionPolicy Bypass -File .\scripts\codex_setup_windows.ps1`
-- Action `Start Windows daemon`: `powershell -ExecutionPolicy Bypass -File .\scripts\run_capture_daemon_windows.ps1`
-- Action `Start WSL model server`: `powershell -ExecutionPolicy Bypass -File .\scripts\run_server_wsl.ps1`
-- Action `Check ASDW status`: `powershell -ExecutionPolicy Bypass -File .\scripts\codex_status.ps1`
-- Action `Run Python compile check`: `powershell -ExecutionPolicy Bypass -File .\scripts\codex_py_compile.ps1`
-- Action `Clean ASDW temp files`: `powershell -ExecutionPolicy Bypass -File .\scripts\codex_cleanup.ps1`
-
-데몬은 화면 캡처와 키 입력 권한을 다루므로 setup script에서 자동 실행하지 않고 명시적인 Action으로만 켭니다.
-
-## 모델/센서
-
-- `template`: OpenCV 버튼 분할과 글자 템플릿 매칭. 빠르고 실제 입력의 주 센서입니다.
-- `classifier`: 이 프로젝트에서 전이학습한 Hugging Face/timm MobileNetV3 분류기입니다.
-- `clip`: `openai/clip-vit-base-patch32` 제로샷 이미지-텍스트 분류.
-- `trocr`: `microsoft/trocr-small-printed` OCR 센서. 느리지만 실험용으로 유용합니다.
-- `owlvit`: `google/owlvit-base-patch32` 제로샷 객체 감지. 이 UI에는 과하지만 멀티모달 감지 실험용입니다.
-
-분류 모델 학습 후 추천 시작값은 `template,classifier`입니다. 더 무겁게 실험하려면 `template,classifier,clip,trocr,owlvit`로 바꾸세요.
-
-기본 융합 가중치는 학습된 `classifier`를 주 분류기로, `template`을 보조 센서로 둡니다. 픽셀 폰트가 달라지면 `ASDW_WEIGHT_TEMPLATE`, `ASDW_WEIGHT_CLASSIFIER`, `ASDW_WEIGHT_CLIP` 환경변수로 조정할 수 있습니다.
-
-## 분류 모델 전이학습
-
-첨부 스크린샷의 버튼 crop을 기준으로 강한 증강 데이터셋을 만들고, `timm/mobilenetv3_small_100.lamb_in1k`의 백본은 고정한 채 classifier head만 ROCm GPU에서 학습합니다.
+PowerShell에서 저장소 루트로 이동합니다.
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\run_train_classifier_wsl.ps1
+cd <repository-root>
 ```
 
-결과 모델은 `D:\asdw-fusion-typer\models\asdw-mobilenetv3-classifier\best`에 저장됩니다.
-
-## 설치
-
-터미널/OS/Python/ROCm/의존성 고정값은 `ENVIRONMENT_LOCK.md`에 기록되어 있습니다. 재설치나 디버깅 전에는 이 문서를 기준으로 버전 드리프트를 확인하세요.
-
-PowerShell에서:
+스키마와 seed 데이터를 검증합니다.
 
 ```powershell
-cd D:\asdw-fusion-typer
-wsl -d Ubuntu-24.04-ROCmLab -- bash -lc "cd /mnt/d/asdw-fusion-typer && bash scripts/setup_wsl_rocm.sh"
-wsl -d Ubuntu-24.04-ROCmLab -- bash -lc "cd /mnt/d/asdw-fusion-typer && bash scripts/download_models.sh"
-powershell -ExecutionPolicy Bypass -File .\scripts\setup_windows_client.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\validate_public_equity_project.ps1
 ```
 
-## 실행
-
-서버:
+SQLite DB와 대시보드용 JSON을 생성합니다.
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\run_server_wsl.ps1 -Sensors "template,classifier"
+powershell -ExecutionPolicy Bypass -File .\scripts\build_public_equity_database.ps1
 ```
 
-클라이언트 dry-run:
+온보딩 대시보드를 로컬에서 실행합니다.
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\run_client_windows.ps1 -Sensors "template,classifier" -DebugDir "D:\asdw-fusion-typer\debug"
+powershell -ExecutionPolicy Bypass -File .\scripts\run_public_equity_dashboard.ps1
 ```
 
-실제 입력:
+기본 URL은 `http://127.0.0.1:5173`입니다.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\run_client_windows.ps1 -Sensors "template,classifier" -LiveInput
-```
+대시보드 실행에는 Node.js와 npm이 필요합니다. 현재 Codex 기본 Python 검증은 Node 없이도 실행됩니다.
 
-## Windows 캡처 데몬
+## 주요 파일
 
-Windows 쪽에 상주 API를 띄워서 필요할 때 화면을 가져오거나 WSL 모델 서버로 1회 전달할 수 있습니다.
+- `research/public_equity_theme_schema/schema.sql`: SQLite DDL, 제약조건, trigger, view
+- `research/public_equity_theme_schema/seed_demo.sql`: AI infrastructure 샘플 테마 seed
+- `research/public_equity_theme_schema/seed_pm_sessions.sql`: PM 세션별 평가 seed
+- `research/public_equity_theme_schema/build_theme_database.py`: SQLite 파일 생성기
+- `research/public_equity_theme_schema/tests/validate_schema.py`: 스키마/seed 기본 검증
+- `research/public_equity_theme_schema/tests/validate_pm_database.py`: PM 세션과 파일 DB 검증
+- `research/public_equity_theme_schema/visual_onboarding/export_dashboard_data.py`: 대시보드 JSON 생성
+- `research/public_equity_theme_schema/visual_onboarding/src/App.tsx`: 온보딩 UI
+- `TODO-public-equity-platform.md`: 다음 구현 로드맵
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\run_capture_daemon_windows.ps1
-```
+## 운영 원칙
 
-끄기는 실행 중인 PowerShell 창에서 `Ctrl+C`를 누르면 됩니다. 포트만 기준으로 강제 종료해야 할 때는:
+- 티커만 식별자로 쓰지 않습니다. `securities`와 `security_identifiers`를 분리합니다.
+- raw payload와 normalized facts를 분리합니다.
+- 테마 노출은 주문, backlog, 매출, margin, estimate revision 같은 source-backed evidence가 있어야 합니다.
+- keyword-only 후보는 `Exposure not yet proven`으로 남깁니다.
+- stale market data는 screen 기준일 대비 별도로 표시합니다.
+- PM 세션별 결론은 섞지 않고 독립적으로 유지합니다.
 
-```powershell
-Get-NetTCPConnection -LocalPort 7870 -ErrorAction SilentlyContinue |
-  Select-Object -ExpandProperty OwningProcess -Unique |
-  ForEach-Object { Stop-Process -Id $_ -Force }
-```
+## 프로젝트 방향
 
-주요 endpoint:
-
-```text
-GET  http://127.0.0.1:7870/health
-GET  http://127.0.0.1:7870/ping
-GET  http://127.0.0.1:7870/frame?monitor=1
-GET  http://127.0.0.1:7870/stream?monitor=1&fps=8
-GET  http://127.0.0.1:7870/queue/status
-POST http://127.0.0.1:7870/predict_once
-POST http://127.0.0.1:7870/keys/press
-POST http://127.0.0.1:7870/text/type_keys
-POST http://127.0.0.1:7870/predict_and_press
-```
-
-기본은 사용자가 보는 모니터 전체 화면입니다. `roi=0.34 0.46 0.66 0.57` 같은 값을 줄 때만 잘라서 보냅니다.
-
-`predict_once` 예:
-
-```powershell
-$body = @{
-  model_url = "http://127.0.0.1:7868/predict"
-  monitor = 1
-  sensors = @("template", "classifier")
-  debug = $true
-} | ConvertTo-Json
-
-Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:7870/predict_once" -ContentType "application/json" -Body $body
-```
-
-키 입력:
-
-데몬의 키 입력은 Windows `SendInput` 기반 단일 입력 어댑터와 작업 대기열을 통과합니다. 기본값은 라이브성 우선이라 새 요청이 들어오면 이전 대기 작업과 진행 중인 작업을 취소하고 최신 요청을 수행합니다.
-
-```powershell
-$body = @{
-  keys = "SDWWDWDAA"
-  dry_run = $false
-} | ConvertTo-Json
-
-Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:7870/keys/press" -ContentType "application/json" -Body $body
-```
-
-순서가 중요한 작업은 대기열을 유지합니다:
-
-```powershell
-$body = @{
-  keys = "ASDW"
-  dry_run = $false
-  queue = @{
-    keep_queue = $true
-    wait = $true
-    timeout_sec = 30
-  }
-} | ConvertTo-Json -Depth 4
-
-Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:7870/keys/press" -ContentType "application/json" -Body $body
-```
-
-한글 키 입력:
-
-데몬은 입력 전에 현재 포커스 창의 키보드 레이아웃이 한국어인지 확인합니다. 혼합 문장은 한글 구간에서 IME를 켜고, 영문/숫자 구간에서 IME를 꺼서 입력합니다. 예를 들어 `안녕하세요 hello`는 한글 구간을 `dkssudgktpdy`로 입력한 뒤 `hello` 직전에 IME를 끕니다.
-
-```powershell
-$body = @{
-  text = "안녕하세요"
-  dry_run = $false
-  require_korean_ime = $true
-} | ConvertTo-Json
-
-Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:7870/text/type_keys" -ContentType "application/json" -Body $body
-```
-
-타이밍을 직접 지정:
-
-```powershell
-$body = @{
-  keys = "SDWWDWDAA"
-  dry_run = $false
-  timing = @{
-    initial_delay_ms = @(80, 220)
-    hold_ms = @(28, 55)
-    between_ms = @(45, 85)
-    long_pause_chance = 0.04
-    long_pause_ms = @(140, 280)
-  }
-} | ConvertTo-Json -Depth 4
-
-Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:7870/keys/press" -ContentType "application/json" -Body $body
-```
-
-캡처, 모델 추론, 키 입력을 한 번에 수행하려면 `/predict_and_press`를 씁니다. 기본은 실제 입력입니다. 입력 없이 검증만 하려면 요청에 `dry_run = $true`를 넣습니다.
-
-## 서버 주도 5초 폴링
-
-서버가 5초마다 Windows 데몬에서 전체 화면을 가져오고, 서버 모델로 처리한 뒤 감지된 `A/S/D/W` 키를 데몬에 다시 보내 입력할 수 있습니다. 자동 루프는 기본으로 꺼져 있고, 필요할 때 켭니다.
-
-한 번만 검증:
-
-```powershell
-$body = @{
-  daemon_url = "http://127.0.0.1:7870"
-  interval_sec = 5
-  monitor = 1
-  sensors = @("template", "classifier")
-  min_confidence = 0.30
-  dry_run = $true
-} | ConvertTo-Json
-
-Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:7868/poller/tick" -ContentType "application/json" -Body $body
-```
-
-5초 루프 시작:
-
-```powershell
-$body = @{
-  daemon_url = "http://127.0.0.1:7870"
-  interval_sec = 5
-  monitor = 1
-  sensors = @("template", "classifier")
-  min_confidence = 0.30
-  dry_run = $false
-  keep_daemon_queue = $false
-} | ConvertTo-Json
-
-Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:7868/poller/start" -ContentType "application/json" -Body $body
-```
-
-상태 확인과 중지:
-
-```powershell
-Invoke-RestMethod -Method Get  -Uri "http://127.0.0.1:7868/poller/status"
-Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:7868/poller/stop"
-```
-
-WSL 서버에서 Windows 데몬의 `127.0.0.1:7870`에 접근이 안 되면 `daemon_url`을 Windows 호스트 IP로 바꾸고, 데몬을 접근 가능한 주소로 띄우세요.
-
-## 서버 주도 하트비트
-
-서버는 데몬의 `/ping`을 주기적으로 호출해 RTT를 계산하고 online/offline 상태로 사용합니다.
-
-```powershell
-$body = @{
-  daemon_url = "http://127.0.0.1:7870"
-  interval_sec = 2
-  timeout_sec = 1
-} | ConvertTo-Json
-
-Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:7868/heartbeat/start" -ContentType "application/json" -Body $body
-Invoke-RestMethod -Method Get  -Uri "http://127.0.0.1:7868/heartbeat/status"
-Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:7868/heartbeat/stop"
-```
-
-로컬 LLM 상태머신 확장 계획은 `TODO-local-daemon-and-llm.md`에 정리했습니다.
-
-## ROI 조정
-
-기본 ROI는 첨부된 Minecraft 화면 기준 입력 버튼 줄입니다.
-
-```text
-left top right bottom = 0.34 0.46 0.66 0.57
-```
-
-프롬프트 위치가 다르면 다음처럼 조정합니다.
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\run_client_windows.ps1 -RoiFrac "0.32 0.45 0.68 0.58" -DebugDir "D:\asdw-fusion-typer\debug"
-```
-
-`debug` 폴더의 PNG/JSON을 보면 서버가 어떤 버튼을 잡았는지 확인할 수 있습니다.
-
-## 참고
-
-WSL에서 PyTorch는 ROCm을 `cuda` 장치처럼 노출합니다. `torch.cuda.is_available()`가 `True`이면 ROCm GPU 추론이 활성화된 상태입니다.
-
-현재 WSL/ROCm 조합에서 GPU 모델 로딩 중 `SDMAQueue` assert가 나면 `HSA_ENABLE_SDMA=0`을 설정하세요. RX 6600 XT처럼 `gfx1032`가 rocBLAS 라이브러리 목록에 없으면 `HSA_OVERRIDE_GFX_VERSION=10.3.0`도 필요합니다. 제공된 서버 실행 스크립트에는 두 값이 기본으로 들어가 있습니다.
+새 작업은 `research/public_equity_theme_schema` 아래 주식 리서치 흐름에 맞춥니다.

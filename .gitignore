@@ -1,6 +1,6 @@
-# Local Python environments
-.venv-wsl/
-.venv-win/
+# Local environments
+.venv/
+.venv-*/
 
 # Python caches
 __pycache__/
@@ -24,7 +24,7 @@ debug/
 logs/
 artifacts/
 
-# Generated training data and model outputs
+# Generated local data and outputs
 data/
 !research/public_equity_theme_schema/visual_onboarding/src/data/
 !research/public_equity_theme_schema/visual_onboarding/src/data/theme-dashboard-data.json

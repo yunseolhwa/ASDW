@@ -1,32 +1,28 @@
 {
-  "project": "ASDW",
+  "project": "Public Equity Theme Research",
   "notes": "Reference manifest for Codex app Local Environment actions. If the app UI generates a different internal schema, use .codex/README.md as the source of truth and register these commands there.",
   "setup": {
-    "windows": "powershell -ExecutionPolicy Bypass -File .\\scripts\\codex_setup_windows.ps1"
+    "windows": "powershell -ExecutionPolicy Bypass -File .\\scripts\\validate_public_equity_project.ps1"
   },
   "cleanup": {
-    "windows": "powershell -ExecutionPolicy Bypass -File .\\scripts\\codex_cleanup.ps1"
+    "windows": "powershell -ExecutionPolicy Bypass -File .\\scripts\\clean_public_equity_outputs.ps1"
   },
   "actions": [
     {
-      "name": "Start Windows daemon",
-      "windows": "powershell -ExecutionPolicy Bypass -File .\\scripts\\run_capture_daemon_windows.ps1"
+      "name": "Validate public equity project",
+      "windows": "powershell -ExecutionPolicy Bypass -File .\\scripts\\validate_public_equity_project.ps1"
     },
     {
-      "name": "Start WSL model server",
-      "windows": "powershell -ExecutionPolicy Bypass -File .\\scripts\\run_server_wsl.ps1"
+      "name": "Build public equity database",
+      "windows": "powershell -ExecutionPolicy Bypass -File .\\scripts\\build_public_equity_database.ps1"
     },
     {
-      "name": "Check ASDW status",
-      "windows": "powershell -ExecutionPolicy Bypass -File .\\scripts\\codex_status.ps1"
+      "name": "Run public equity dashboard",
+      "windows": "powershell -ExecutionPolicy Bypass -File .\\scripts\\run_public_equity_dashboard.ps1"
     },
     {
-      "name": "Run Python compile check",
-      "windows": "powershell -ExecutionPolicy Bypass -File .\\scripts\\codex_py_compile.ps1"
-    },
-    {
-      "name": "Clean ASDW temp files",
-      "windows": "powershell -ExecutionPolicy Bypass -File .\\scripts\\codex_cleanup.ps1"
+      "name": "Clean generated outputs",
+      "windows": "powershell -ExecutionPolicy Bypass -File .\\scripts\\clean_public_equity_outputs.ps1"
     }
   ]
 }

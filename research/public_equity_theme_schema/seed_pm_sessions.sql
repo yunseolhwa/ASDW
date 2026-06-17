@@ -190,3 +190,18 @@ INSERT INTO source_conflicts (
   resolution_note
 ) VALUES
   (1, 1, 2, 2, 4, 'theme_exposures', '2', NULL, 'AI data center', 'management claim mentions AI demand', 'no estimate revision proof in demo consensus export', 'Management-claim visibility conflicts with the lack of quantified exposure or revision evidence.', 'open', 'Resolve by retrieving source-backed orders, backlog, revenue, margin, or estimate-revision attribution.');
+
+UPDATE pm_sessions
+SET created_at = '2026-06-16 11:28:32';
+
+UPDATE pm_decision_gates
+SET reviewed_at = '2026-06-16 11:28:32';
+
+UPDATE pm_cross_session_conflicts
+SET created_at = '2026-06-16 11:28:32';
+
+UPDATE assumption_register
+SET created_at = '2026-06-16 11:28:32';
+
+UPDATE source_conflicts
+SET created_at = '2026-06-16 11:28:32';

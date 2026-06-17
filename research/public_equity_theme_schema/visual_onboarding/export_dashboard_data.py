@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -101,19 +100,31 @@ def row_count(con: sqlite3.Connection, name: str) -> int:
     return int(con.execute(f"SELECT count(*) FROM {quoted}").fetchone()[0])
 
 
+def repo_display_path(path: Path) -> str:
+    try:
+        return path.resolve().relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def export_generated_at(con: sqlite3.Connection) -> str:
+    as_of_date = con.execute("SELECT max(as_of_date) FROM screen_runs").fetchone()[0]
+    return f"{as_of_date}T00:00:00+00:00"
+
+
 def export_dashboard_data(db_path: Path, output_path: Path) -> Path:
     con = sqlite3.connect(db_path)
     con.row_factory = sqlite3.Row
     try:
         con.execute("PRAGMA foreign_keys = ON")
         db = {
-            "path": str(db_path),
+            "path": repo_display_path(db_path),
             "userVersion": con.execute("PRAGMA user_version").fetchone()[0],
             "tableCount": con.execute(
                 "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
             ).fetchone()[0],
             "viewCount": con.execute("SELECT count(*) FROM sqlite_master WHERE type = 'view'").fetchone()[0],
-            "generatedAt": datetime.now(timezone.utc).isoformat(),
+            "generatedAt": export_generated_at(con),
             "foreignKeyCheck": rows(con, "PRAGMA foreign_key_check"),
         }
 

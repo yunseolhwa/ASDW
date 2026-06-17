@@ -2,7 +2,7 @@
 
 This package defines a reusable SQLite schema for the first step of a public-equity market-theme workflow: turning a market theme into a source-backed research queue.
 
-It is intentionally separate from the ASDW app. The schema supports research prioritization, not final trade recommendations.
+The schema supports research prioritization, not final trade recommendations.
 
 ## Scope
 

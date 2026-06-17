@@ -1,10 +1,10 @@
 {
   "db": {
-    "path": "C:\\Users\\ROCmAdmin\\.codex\\worktrees\\e16a\\asdw-fusion-typer\\artifacts\\public_equity_theme_schema.sqlite",
+    "path": "artifacts/public_equity_theme_schema.sqlite",
     "userVersion": 2,
     "tableCount": 42,
     "viewCount": 6,
-    "generatedAt": "2026-06-16T12:30:51.239441+00:00",
+    "generatedAt": "2026-06-16T00:00:00+00:00",
     "foreignKeyCheck": []
   },
   "theme": {
